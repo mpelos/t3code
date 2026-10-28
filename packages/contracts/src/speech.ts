@@ -3,6 +3,7 @@ import { DictationSettings, NarrationSettings } from "./settings.ts";
 
 export const SPEECH_AUDIO_MAX_BYTES = 20 * 1024 * 1024;
 export const NARRATION_CHUNK_MAX_BYTES = 4000;
+export const QWEN_NARRATION_CHUNK_MAX_CHARACTERS = 300;
 export const SpeechAudioFormat = Schema.Literals(["webm", "mp4", "m4a", "ogg", "wav"]);
 export type SpeechAudioFormat = typeof SpeechAudioFormat.Type;
 
@@ -17,10 +18,14 @@ export const SpeechConfigureInput = Schema.Union([
 ]);
 export type SpeechConfigureInput = typeof SpeechConfigureInput.Type;
 
+export function isNarrationConfigured(config: NarrationSettings | null | undefined): boolean {
+  return config != null && (config.provider === "qwen" || Boolean(config.credential));
+}
+
 export class SpeechError extends Schema.TaggedError<SpeechError>()(
   "SpeechError",
   {
-    provider: Schema.optionalKey(Schema.Literals(["openai", "google", "elevenlabs"])),
+    provider: Schema.optionalKey(Schema.Literals(["openai", "google", "elevenlabs", "qwen"])),
     role: Schema.optionalKey(Schema.Literals(["dictation", "narration"])),
     reason: Schema.Literals([
       "not-configured",
@@ -44,8 +49,40 @@ export class SpeechError extends Schema.TaggedError<SpeechError>()(
           ? "Google Cloud"
           : this.provider === "elevenlabs"
             ? "ElevenLabs"
-            : "Speech";
+            : this.provider === "qwen"
+              ? "Qwen3-TTS"
+              : "Speech";
     const context = `${provider}${this.role ? ` ${this.role}` : ""}: `;
+    if (this.provider === "qwen") {
+      switch (this.reason) {
+        case "unavailable":
+          return (
+            context +
+            "The local voice server is unavailable or still loading. Start MLX Audio on the selected Speech environment and check its server URL."
+          );
+        case "rejected":
+          return (
+            context +
+            "The local voice server rejected the request. Check the installed CustomVoice model, voice, and language in Speech settings."
+          );
+        case "quota-exceeded":
+          return (
+            context +
+            "The local voice server is busy. Try again after the current generation finishes."
+          );
+        case "invalid-credential":
+        case "permission-denied":
+          return (
+            context +
+            "The local voice server denied access. Check its address and access configuration in Speech settings."
+          );
+        case "invalid-response":
+          return (
+            context +
+            "The local voice server did not return playable MP3 audio. Check its model and FFmpeg installation."
+          );
+      }
+    }
     switch (this.reason) {
       case "not-configured":
         return context + "Configure a speech provider in Settings first.";

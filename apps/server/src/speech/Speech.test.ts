@@ -36,6 +36,65 @@ function jsonBody(request: HttpClientRequest.HttpClientRequest): unknown {
   return decodeJson(new TextDecoder().decode(request.body.body));
 }
 
+it.effect(
+  "validates and saves local Qwen narration without credentials, preserving settings on failure",
+  () =>
+    Effect.gen(function* () {
+      let status = 503;
+      let contentType = "audio/mpeg";
+      let requests = 0;
+      const config = {
+        provider: "qwen",
+        baseUrl: "http://127.0.0.1:18320/engine",
+        voice: "Ryan",
+        language: "Portuguese",
+      } as const;
+      const layer = testLayer({ dictation: null, narration: null }, (request) => {
+        requests++;
+        expect(request.url).toBe("http://127.0.0.1:18320/engine/v1/audio/speech");
+        expect(request.headers.authorization).toBeUndefined();
+        expect(request.headers["xi-api-key"]).toBeUndefined();
+        expect(jsonBody(request)).toMatchObject({
+          model: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
+          voice: "Ryan",
+          lang_code: "Portuguese",
+          response_format: "mp3",
+          stream: false,
+          max_tokens: 1024,
+        });
+        return new Response(new Uint8Array([73, 68, 51]), {
+          status,
+          headers: { "content-type": contentType },
+        });
+      });
+      yield* Effect.gen(function* () {
+        const speech = yield* Speech.Speech;
+        const settings = yield* ServerSettingsModule.ServerSettingsService;
+        expect(
+          yield* speech.configure({ role: "narration", config }).pipe(Effect.flip),
+        ).toMatchObject({ provider: "qwen", reason: "unavailable" });
+        expect((yield* settings.getSettings).speech.narration).toBeNull();
+        status = 200;
+        yield* speech.configure({ role: "narration", config });
+        expect((yield* settings.getSettings).speech.narration).toEqual(config);
+        expect(Array.from(yield* speech.narrate({ text: "Olá" }))).toEqual([73, 68, 51]);
+        const beforeOversize = requests;
+        expect(yield* speech.narrate({ text: "a".repeat(301) }).pipe(Effect.flip)).toMatchObject({
+          reason: "invalid-text",
+        });
+        expect(requests).toBe(beforeOversize);
+        contentType = "application/json";
+        expect(yield* speech.narrate({ text: "Olá" }).pipe(Effect.flip)).toMatchObject({
+          provider: "qwen",
+          reason: "invalid-response",
+        });
+        expect((yield* settings.getSettings).speech.narration).toEqual(config);
+        yield* speech.configure({ role: "narration", config: null });
+        expect((yield* settings.getSettings).speech.narration).toBeNull();
+      }).pipe(Effect.provide(layer));
+    }),
+);
+
 it.effect("sends a Whisper recording with the configured language and returns the transcript", () =>
   Effect.gen(function* () {
     const layer = testLayer(
@@ -174,12 +233,24 @@ it.effect(
     }),
 );
 
-it.effect.each([401, 403, 422, 429, 503])("reports safe errors for upstream HTTP %s", (status) =>
+it.effect.each(
+  [401, 403, 422, 429, 503].flatMap((status) =>
+    ["elevenlabs", "qwen"].map((provider) => ({ status, provider })),
+  ),
+)("reports safe errors for upstream HTTP %j", ({ status, provider }) =>
   Effect.gen(function* () {
     const layer = testLayer(
       {
         dictation: null,
-        narration: { provider: "elevenlabs", credential: "secret", voice: "voice-id" },
+        narration:
+          provider === "qwen"
+            ? {
+                provider: "qwen",
+                baseUrl: "http://127.0.0.1:18320",
+                voice: "Ryan",
+                language: "Portuguese",
+              }
+            : { provider: "elevenlabs", credential: "secret", voice: "voice-id" },
       },
       () => new Response("private response details", { status }),
     );
@@ -188,7 +259,7 @@ it.effect.each([401, 403, 422, 429, 503])("reports safe errors for upstream HTTP
     }).pipe(Effect.provide(layer), Effect.flip);
     expect(error).toMatchObject({
       _tag: "SpeechError",
-      provider: "elevenlabs",
+      provider,
       role: "narration",
       reason:
         status === 401
@@ -202,7 +273,10 @@ it.effect.each([401, 403, 422, 429, 503])("reports safe errors for upstream HTTP
                 : "rejected",
     });
     expect(error.message).not.toContain("private");
-    expect(error.message).toContain("ElevenLabs narration");
+    expect(error.message).toContain(
+      provider === "qwen" ? "Qwen3-TTS narration" : "ElevenLabs narration",
+    );
+    if (provider === "qwen") expect(error.message).not.toMatch(/billing|balance|API key/);
   }),
 );
 
@@ -289,7 +363,7 @@ it.effect.each(["dictation", "narration"] as const)(
             ? { ...config, config: { ...config.config, credential: "••••••" } }
             : { ...config, config: { ...config.config, credential: "••••••" } },
         );
-        expect((yield* settings.getSettings).speech[role]?.credential).toBe("new-key");
+        expect((yield* settings.getSettings).speech[role]).toMatchObject({ credential: "new-key" });
         yield* speech.configure({ role, config: null });
         expect((yield* settings.getSettings).speech[role]).toBeNull();
         expect(requests).toBe(3);

@@ -1,5 +1,6 @@
 import { speechErrorRequiresConfiguration } from "./settings.ts";
 import { narrationChunks } from "@t3tools/shared/narration";
+import type { NarrationSettings } from "@t3tools/contracts";
 
 export type NarrationState = {
   readonly owner: string | null;
@@ -88,10 +89,16 @@ export class NarrationController<Context> {
     this.playback?.setRate(rate);
   }
 
-  async start(owner: string, markdown: string, context: Context): Promise<void> {
+  async start(
+    owner: string,
+    markdown: string,
+    context: Context,
+    provider?: NarrationSettings["provider"],
+  ): Promise<void> {
     this.stop();
-    const chunks = narrationChunks(markdown);
-    if (chunks.length === 0) {
+    const chunks = narrationChunks(markdown, provider);
+    const first = chunks[0];
+    if (first === undefined) {
       this.publish({
         ...this.state,
         owner,
@@ -103,20 +110,31 @@ export class NarrationController<Context> {
     }
     const operation = new AbortController();
     this.active = operation;
+    this.publish({ ...this.state, owner, phase: "loading", error: null, errorAction: null });
     let completedSeconds = 0;
+    const generate = async (text: string) => {
+      try {
+        return { audio: await this.dependencies.synthesize(text, context, operation.signal) };
+      } catch (error) {
+        return { error };
+      }
+    };
+    let pending = generate(first);
     try {
-      for (const text of chunks) {
-        this.publish({ ...this.state, owner, phase: "loading", error: null, errorAction: null });
-        const audio = await this.dependencies.synthesize(text, context, operation.signal);
+      for (const [index] of chunks.entries()) {
+        const result = await pending;
         if (operation.signal.aborted) return;
+        if ("error" in result) throw result.error;
         let position = 0;
-        await this.dependencies.play(audio, operation.signal, {
+        await this.dependencies.play(result.audio, operation.signal, {
           onReady: (playback) => {
             if (operation.signal.aborted) return;
             this.playback = playback;
             playback.setRate(this.state.rate);
             this.publish({ ...this.state, phase: "playing" });
             playback.setPaused(this.state.paused);
+            const next = chunks[index + 1];
+            if (next !== undefined) pending = generate(next);
           },
           onProgress: (seconds) => {
             if (operation.signal.aborted || !Number.isFinite(seconds) || seconds < 0) return;
@@ -129,6 +147,7 @@ export class NarrationController<Context> {
         if (operation.signal.aborted) return;
         this.playback = null;
         completedSeconds += position;
+        if (index + 1 < chunks.length) this.publish({ ...this.state, phase: "loading" });
       }
       if (this.active === operation) this.stop();
     } catch (error) {

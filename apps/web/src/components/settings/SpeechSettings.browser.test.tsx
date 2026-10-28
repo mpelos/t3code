@@ -1,5 +1,6 @@
 import * as Cause from "effect/Cause";
 import {
+  DEFAULT_QWEN_NARRATION_URL,
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_VERSION,
   ServerConfig,
@@ -76,6 +77,51 @@ vi.mock(import("./useSettingsProjectGroups"), () => ({ useSettingsProjectGroups:
 
 import { SettingsScopeProvider } from "./SettingsScopeContext";
 import { SpeechSettings } from "./SpeechSettings";
+
+it("configures a local voice without credentials and preserves its voice and language", async () => {
+  state.environments = [environment("Server")];
+  state.primaryId = EnvironmentId.make("Server");
+  state.selectedId = EnvironmentId.make("Server");
+  for (const listener of state.listeners) listener();
+  state.update.mockReset().mockResolvedValue(AsyncResult.success(undefined));
+  await using screen = await render(<SpeechSettings />);
+  await userEvent.click(screen.getByRole("combobox", { name: "Read aloud provider" }));
+  await userEvent.click(page.getByRole("option", { name: "Qwen3-TTS (local)" }));
+  await expect.element(screen.getByLabelText("Read aloud credentials")).not.toBeInTheDocument();
+  await expect
+    .element(screen.getByLabelText("Local voice server URL"))
+    .toHaveValue(DEFAULT_QWEN_NARRATION_URL);
+  await userEvent.click(screen.getByRole("combobox", { name: "Narration voice" }));
+  await userEvent.click(page.getByRole("option", { name: "Aiden", exact: true }));
+  state.update.mockResolvedValueOnce(
+    AsyncResult.failure(
+      Cause.fail(new SpeechError({ provider: "qwen", role: "narration", reason: "unavailable" })),
+    ),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Validate and save read aloud" }));
+  await expect
+    .element(screen.getByRole("alert"))
+    .toMatchTextContent(/local voice server is unavailable/);
+  await expect
+    .element(screen.getByRole("combobox", { name: "Narration voice" }))
+    .toHaveTextContent("Aiden");
+  await userEvent.click(screen.getByRole("button", { name: "Validate and save read aloud" }));
+  await expect
+    .element(screen.getByRole("status"))
+    .toHaveTextContent("Local narration verified and saved.");
+  expect(state.update).toHaveBeenLastCalledWith({
+    environmentId: EnvironmentId.make("Server"),
+    input: {
+      role: "narration",
+      config: {
+        provider: "qwen",
+        baseUrl: DEFAULT_QWEN_NARRATION_URL,
+        voice: "Aiden",
+        language: "Portuguese",
+      },
+    },
+  });
+});
 
 const decodeConfig = Schema.decodeUnknownSync(ServerConfig);
 function environment(id: string): EnvironmentPresentation {

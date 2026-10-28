@@ -155,11 +155,11 @@ export function mapSettingsSecrets(
       ) as EasDeviceHostConfig,
   );
 
-  const mapSpeech = <T extends { readonly provider: string; readonly credential: string }>(
+  const mapSpeech = <T extends { readonly provider: string; readonly credential?: string }>(
     role: string,
     config: T | null,
   ): T | null => {
-    if (config === null) return null;
+    if (config === null || config.credential === undefined) return config;
     const result = map({
       secretName: `speech-${role}-${config.provider}`,
       kind: "field",

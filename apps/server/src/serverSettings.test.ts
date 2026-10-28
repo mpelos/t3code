@@ -1849,12 +1849,14 @@ it.effect(
       assert.notInclude(raw, "narration-secret");
       const redacted = ServerSettingsModule.redactServerSettingsForClient(saved).speech;
       assert.notEqual(redacted.dictation?.credential, "dictation-secret");
+      if (redacted.narration?.provider !== "elevenlabs")
+        throw new Error("Expected ElevenLabs narration");
       yield* settings.updateSettings({
         speech: { narration: redacted.narration && { ...redacted.narration, voice: "voice-2" } },
       });
       const kept = (yield* settings.getSettings).speech;
       assert.equal(kept.dictation?.credential, "dictation-secret");
-      assert.equal(kept.narration?.credential, "narration-secret");
+      assert.deepInclude(kept.narration, { credential: "narration-secret" });
       yield* settings.updateSettings({
         speech: {
           dictation: { provider: "google", credential: "google-secret", language: "pt-BR" },
@@ -1862,6 +1864,21 @@ it.effect(
       });
       assert.isTrue(Option.isNone(yield* secrets.get("speech-dictation-openai")));
       assert.isTrue(Option.isSome(yield* secrets.get("speech-dictation-google")));
+      const local = {
+        provider: "qwen",
+        baseUrl: "http://127.0.0.1:18320",
+        voice: "Ryan",
+        language: "Portuguese",
+      } as const;
+      yield* settings.updateSettings({ speech: { narration: local } });
+      assert.isTrue(Option.isNone(yield* secrets.get("speech-narration-elevenlabs")));
+      assert.deepEqual(
+        ServerSettingsModule.redactServerSettingsForClient(yield* settings.getSettings).speech
+          .narration,
+        local,
+      );
+      const onDisk = yield* decodeServerSettingsJson(yield* fs.readFileString(config.settingsPath));
+      assert.deepEqual(onDisk.speech.narration, local);
       yield* settings.updateSettings({ speech: { narration: null } });
       assert.isTrue(Option.isNone(yield* secrets.get("speech-narration-elevenlabs")));
       assert.equal((yield* settings.getSettings).speech.dictation?.credential, "google-secret");

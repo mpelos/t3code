@@ -34,7 +34,7 @@ export function NarrationPlayer() {
                 hash="speech-narration"
                 onClick={() => controller.stop()}
               >
-                Fix credentials
+                Speech settings
               </Link>
             ) : null}
           </div>

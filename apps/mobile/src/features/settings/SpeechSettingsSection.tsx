@@ -4,9 +4,14 @@ import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
 import { useAtomValue, useAtomSet } from "@effect/atom-react";
 import { useState } from "react";
 import { View, Pressable } from "react-native";
-import { type EnvironmentId, type SpeechSettings } from "@t3tools/contracts";
 import {
-  SPEECH_PROVIDERS,
+  QWEN_NARRATION_VOICES,
+  QWEN_NARRATION_LANGUAGES,
+  type EnvironmentId,
+  type SpeechSettings,
+} from "@t3tools/contracts";
+import {
+  speechProviderOptions,
   speechSettingsDraft,
   selectSpeechProvider,
   dictationSettingsFromDraft,
@@ -15,7 +20,6 @@ import {
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { AppText as Text, AppTextInput } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
-import { SegmentedControl } from "../../components/ui/SegmentedControl";
 import { speechEnvironment, speechContextAtom } from "../../state/speech";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -156,10 +160,10 @@ function SpeechForm({
       setSaved(true);
     }
   }
-  function field(name: "credential" | "language" | "voice", placeholder: string) {
+  function field(name: "credential" | "language" | "voice" | "baseUrl", placeholder: string) {
     return (
       <AppTextInput
-        accessibilityLabel={`${label} ${name}`}
+        accessibilityLabel={name === "baseUrl" ? "Local voice server URL" : `${label} ${name}`}
         className="rounded-lg border border-border-subtle px-3 py-2 text-base text-foreground"
         placeholder={placeholder}
         value={draft[name]}
@@ -171,28 +175,69 @@ function SpeechForm({
       />
     );
   }
+  function choice(name: "language" | "voice", values: readonly string[]) {
+    return (
+      <View pointerEvents={disabled ? "none" : "auto"}>
+        <Menu
+          actions={values.map((value) => ({ id: value, title: value }))}
+          onPressAction={({ nativeEvent }) => changeDraft({ ...draft, [name]: nativeEvent.event })}
+        >
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`${label} ${name}`}
+            disabled={disabled}
+            className="min-h-12 flex-row items-center justify-between rounded-lg border border-border-subtle px-3 py-2"
+          >
+            <Text className="text-foreground-muted">{name === "voice" ? "Voice" : "Language"}</Text>
+            <Text className="text-foreground">{draft[name]}</Text>
+          </Pressable>
+        </Menu>
+      </View>
+    );
+  }
   return (
     <View className="gap-3 p-4">
       <Text className="font-t3-medium text-base text-foreground">{label}</Text>
       <View pointerEvents={disabled ? "none" : "auto"}>
-        <SegmentedControl
-          selected={draft.provider}
-          options={SPEECH_PROVIDERS.filter(
-            (option) => role === "narration" || option.value !== "elevenlabs",
-          )}
-          onSelect={(provider) => changeDraft(selectSpeechProvider(draft, provider))}
-        />
+        <Menu
+          actions={speechProviderOptions(role).map((option) => ({
+            id: option.value,
+            title: option.label,
+          }))}
+          onPressAction={({ nativeEvent }) => {
+            const provider = speechProviderOptions(role).find(
+              (option) => option.value === nativeEvent.event,
+            );
+            if (provider) changeDraft(selectSpeechProvider(draft, provider.value));
+          }}
+        >
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`${label} provider`}
+            disabled={disabled}
+            className="min-h-12 flex-row items-center justify-between rounded-lg border border-border-subtle px-3 py-2"
+          >
+            <Text className="text-foreground-muted">Provider</Text>
+            <Text className="text-foreground">
+              {speechProviderOptions(role).find((option) => option.value === draft.provider)?.label}
+            </Text>
+          </Pressable>
+        </Menu>
       </View>
       {draft.provider !== "disabled" ? (
         <>
-          {field(
-            "credential",
-            current?.provider === draft.provider && current.credential
-              ? "Stored credential; enter to replace"
-              : draft.provider === "google"
-                ? "Service account JSON"
-                : "API key",
-          )}
+          {draft.provider !== "qwen"
+            ? field(
+                "credential",
+                current?.provider === draft.provider &&
+                  "credential" in current &&
+                  current.credential
+                  ? "Stored credential; enter to replace"
+                  : draft.provider === "google"
+                    ? "Service account JSON"
+                    : "API key",
+              )
+            : null}
           {draft.provider === "google" ? (
             <Text className="text-sm text-foreground-muted">
               Paste a service account JSON key with access to{" "}
@@ -200,10 +245,21 @@ function SpeechForm({
               billing in its project.
             </Text>
           ) : null}
+          {draft.provider === "qwen" ? (
+            <>
+              {field("baseUrl", "Local server URL (on the Speech environment)")}
+              <Text className="text-sm text-foreground-muted">
+                Run Qwen3-TTS with MLX Audio on the selected Speech environment. Audio is generated
+                there and sent to this device.
+              </Text>
+              {choice("language", QWEN_NARRATION_LANGUAGES)}
+              {choice("voice", QWEN_NARRATION_VOICES)}
+            </>
+          ) : null}
           {role === "dictation" || draft.provider === "google"
             ? field("language", "Language code (pt-BR)")
             : null}
-          {role === "narration"
+          {role === "narration" && draft.provider !== "qwen"
             ? field("voice", draft.provider === "elevenlabs" ? "ElevenLabs voice ID" : "Voice name")
             : null}
           {role === "dictation" && draft.provider === "google" ? (
@@ -213,8 +269,9 @@ function SpeechForm({
       ) : null}
       {draft.provider !== "disabled" ? (
         <Text className="text-sm text-foreground-muted">
-          Saving tests your credentials with a short request to the selected provider and may use
-          credits.
+          {draft.provider === "qwen"
+            ? "Saving generates a short audio sample on the selected environment to verify the local model."
+            : "Saving tests your credentials with a short request to the selected provider and may use credits."}
         </Text>
       ) : null}
       {!allowed ? (
@@ -224,7 +281,11 @@ function SpeechForm({
       ) : null}
       {saved ? (
         <Text accessibilityRole="alert">
-          {draft.provider === "disabled" ? "Disabled." : "Credentials verified and saved."}
+          {draft.provider === "disabled"
+            ? "Disabled."
+            : draft.provider === "qwen"
+              ? "Local narration verified and saved."
+              : "Credentials verified and saved."}
         </Text>
       ) : null}
       {error ? (

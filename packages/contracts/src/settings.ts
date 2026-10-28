@@ -856,7 +856,58 @@ export const DictationSettings = Schema.Struct({
 });
 export type DictationSettings = typeof DictationSettings.Type;
 
+export const QWEN_NARRATION_VOICES = [
+  "Vivian",
+  "Serena",
+  "Uncle_Fu",
+  "Dylan",
+  "Eric",
+  "Ryan",
+  "Aiden",
+  "Ono_Anna",
+  "Sohee",
+] as const;
+export const QWEN_NARRATION_LANGUAGES = [
+  "Auto",
+  "Chinese",
+  "English",
+  "Japanese",
+  "Korean",
+  "German",
+  "French",
+  "Russian",
+  "Portuguese",
+  "Spanish",
+  "Italian",
+] as const;
+export const DEFAULT_QWEN_NARRATION_URL = "http://127.0.0.1:18320";
+export const QwenNarrationSettings = Schema.Struct({
+  provider: Schema.Literal("qwen"),
+  baseUrl: TrimmedNonEmptyString.check(
+    Schema.makeFilter(
+      (value) => {
+        try {
+          const url = new URL(value);
+          return (
+            (url.protocol === "http:" || url.protocol === "https:") &&
+            !url.username &&
+            !url.password &&
+            !url.search &&
+            !url.hash
+          );
+        } catch {
+          return false;
+        }
+      },
+      { message: "Enter an HTTP or HTTPS server URL without credentials, query, or fragment." },
+    ),
+  ),
+  voice: Schema.Literals(QWEN_NARRATION_VOICES),
+  language: Schema.Literals(QWEN_NARRATION_LANGUAGES),
+});
+
 export const NarrationSettings = Schema.Union([
+  QwenNarrationSettings,
   Schema.Struct({
     provider: Schema.Literals(["openai", "elevenlabs"]),
     credential: SpeechCredential,

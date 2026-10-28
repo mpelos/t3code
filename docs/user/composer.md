@@ -181,7 +181,8 @@ This selection is remembered and applies to every chat, including chats whose ag
 run on another environment. The chosen environment must be connected; credentials
 stay in its secret store. Dictation
 supports OpenAI Whisper and Google Cloud Speech-to-Text. Narration supports OpenAI,
-ElevenLabs (Eleven v4), and Google Cloud Text-to-Speech. Each function can be disabled separately.
+ElevenLabs (Eleven v4), Google Cloud Text-to-Speech, and local Qwen3-TTS with preset
+voices. Each function can be disabled separately.
 
 OpenAI and ElevenLabs use your API key; ElevenLabs also needs a voice ID. Google
 uses a service account JSON key from a project with billing and the corresponding
@@ -191,6 +192,27 @@ environment's secret store and are not sent back to clients. **Validate and save
 tests the selected function before replacing its saved configuration; the short test
 request can consume provider credits. If a credential expires later, **Fix credentials**
 opens Speech settings for the selected Speech environment and affected function.
+
+For **Qwen3-TTS (local)** narration, install MLX Audio and its
+`mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit` model on the selected Speech
+environment. On an Apple Silicon Mac with Python 3.12 and FFmpeg installed:
+
+```sh
+python3.12 -m venv ~/.local/share/t3-qwen/venv
+source ~/.local/share/t3-qwen/venv/bin/activate
+python -m pip install 'mlx-audio[tts,server]==0.6.3'
+hf download mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit
+HF_HUB_OFFLINE=1 mlx_audio.server --host 127.0.0.1 --port 18320
+```
+
+Keep the voice server running. In Speech settings, select **Qwen3-TTS (local)**,
+use `http://127.0.0.1:18320` as the server URL, choose a preset voice and language,
+then validate and save. The first generation loads the model into memory, so it
+takes longer. No API key is needed. The URL is resolved
+on the Speech environment; mobile and remote clients receive the generated audio
+through their existing T3 connection. They do not need Python or the model installed.
+Once the model is downloaded, narration can run without an external TTS provider.
+If local generation fails, open **Speech settings** from the player to check its setup.
 
 Use the composer's microphone to record, then confirm to transcribe into your draft.
 Review and edit the text before sending. Canceling discards the recording and keeps

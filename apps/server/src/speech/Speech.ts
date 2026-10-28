@@ -1,5 +1,7 @@
 import {
   NARRATION_CHUNK_MAX_BYTES,
+  QWEN_NARRATION_CHUNK_MAX_CHARACTERS,
+  isNarrationConfigured,
   SPEECH_AUDIO_MAX_BYTES,
   SpeechError,
   type SpeechAudioFormat,
@@ -214,7 +216,11 @@ const make = Effect.gen(function* () {
     config: NarrationSettings,
     { text }: NarrationInput,
   ) {
-    if (!text.trim() || new TextEncoder().encode(text).byteLength > NARRATION_CHUNK_MAX_BYTES) {
+    if (
+      !text.trim() ||
+      new TextEncoder().encode(text).byteLength > NARRATION_CHUNK_MAX_BYTES ||
+      (config.provider === "qwen" && text.length > QWEN_NARRATION_CHUNK_MAX_CHARACTERS)
+    ) {
       return yield* new SpeechError({ reason: "invalid-text" });
     }
     if (config.provider === "google") {
@@ -234,27 +240,52 @@ const make = Effect.gen(function* () {
         return yield* new SpeechError({ reason: "invalid-response" });
       return result.audioContent;
     }
-    const request =
-      config.provider === "openai"
-        ? HttpClientRequest.post("https://api.openai.com/v1/audio/speech").pipe(
-            HttpClientRequest.setHeader("authorization", `Bearer ${config.credential}`),
-            HttpClientRequest.bodyJsonUnsafe({
-              model: "gpt-4o-mini-tts",
-              voice: config.voice,
-              input: text,
-              response_format: "mp3",
-            }),
-          )
-        : HttpClientRequest.post(
-            "https://api.elevenlabs.io/v1/text-to-dialogue?output_format=mp3_44100_128",
-          ).pipe(
-            HttpClientRequest.setHeader("xi-api-key", config.credential),
-            HttpClientRequest.bodyJsonUnsafe({
-              inputs: [{ text, voice_id: config.voice }],
-              model_id: "eleven_v4",
-            }),
-          );
+    let request: HttpClientRequest.HttpClientRequest;
+    switch (config.provider) {
+      case "openai":
+        request = HttpClientRequest.post("https://api.openai.com/v1/audio/speech").pipe(
+          HttpClientRequest.setHeader("authorization", `Bearer ${config.credential}`),
+          HttpClientRequest.bodyJsonUnsafe({
+            model: "gpt-4o-mini-tts",
+            voice: config.voice,
+            input: text,
+            response_format: "mp3",
+          }),
+        );
+        break;
+      case "elevenlabs":
+        request = HttpClientRequest.post(
+          "https://api.elevenlabs.io/v1/text-to-dialogue?output_format=mp3_44100_128",
+        ).pipe(
+          HttpClientRequest.setHeader("xi-api-key", config.credential),
+          HttpClientRequest.bodyJsonUnsafe({
+            inputs: [{ text, voice_id: config.voice }],
+            model_id: "eleven_v4",
+          }),
+        );
+        break;
+      case "qwen": {
+        const base = config.baseUrl.endsWith("/") ? config.baseUrl : `${config.baseUrl}/`;
+        request = HttpClientRequest.post(new URL("v1/audio/speech", base).href).pipe(
+          HttpClientRequest.bodyJsonUnsafe({
+            model: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
+            input: text,
+            voice: config.voice,
+            lang_code: config.language,
+            response_format: "mp3",
+            stream: false,
+            max_tokens: 1024,
+          }),
+        );
+        break;
+      }
+    }
     const response = yield* execute(request);
+    if (
+      config.provider === "qwen" &&
+      !/^audio\/(?:mpeg|mp3)(?:;|$)/i.test(response.headers["content-type"] ?? "")
+    )
+      return yield* new SpeechError({ reason: "invalid-response" });
     const buffer = yield* response.arrayBuffer.pipe(
       Effect.mapError((cause) => new SpeechRequestError({ reason: "invalid-response", cause })),
     );
@@ -295,20 +326,20 @@ const make = Effect.gen(function* () {
   });
   const narrate = Effect.fn("Speech.narrate")(function* (input: NarrationInput) {
     const config = (yield* settings.getSettings).speech.narration;
-    if (!config?.credential)
+    if (!config || !isNarrationConfigured(config))
       return yield* new SpeechError({ reason: "not-configured", role: "narration" });
     return yield* contextualize("narration", config.provider, synthesize(config, input));
   });
   const configure = Effect.fn("Speech.configure")(function* (input: SpeechConfigureInput) {
     const current = (yield* settings.getSettings).speech[input.role];
     const resolveConfig = <T extends DictationSettings | NarrationSettings>(config: T | null) =>
-      config === null
-        ? null
+      config === null || !("credential" in config)
+        ? config
         : {
             ...config,
             credential:
               config.credential === SECRET_REDACTED
-                ? current?.provider === config.provider
+                ? current && "credential" in current && current.provider === config.provider
                   ? current.credential
                   : ""
                 : config.credential,
@@ -318,7 +349,7 @@ const make = Effect.gen(function* () {
         ? { role: input.role, config: resolveConfig(input.config) }
         : { role: input.role, config: resolveConfig(input.config) };
     if (candidate.config) {
-      if (!candidate.config.credential)
+      if ("credential" in candidate.config && !candidate.config.credential)
         return yield* new SpeechError({
           reason: "invalid-credential",
           role: input.role,

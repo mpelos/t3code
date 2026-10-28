@@ -20,7 +20,7 @@ export {
 
 export { NarrationController, type NarrationPlaybackOptions } from "./narration.ts";
 export {
-  SPEECH_PROVIDERS,
+  speechProviderOptions,
   speechSettingsDraft,
   selectSpeechProvider,
   dictationSettingsFromDraft,

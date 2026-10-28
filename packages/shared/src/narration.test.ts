@@ -1,6 +1,6 @@
 import { expect, it } from "vite-plus/test";
 import { narrationChunks } from "./narration.ts";
-import { NARRATION_CHUNK_MAX_BYTES } from "@t3tools/contracts";
+import { NARRATION_CHUNK_MAX_BYTES, QWEN_NARRATION_CHUNK_MAX_CHARACTERS } from "@t3tools/contracts";
 
 it("reads prose, link labels, and inline code without narrating code blocks or hidden HTML", () => {
   expect(
@@ -32,4 +32,12 @@ it("reads table values without Markdown separators", () => {
   expect(narrationChunks("| Name | Result |\n| --- | --- |\n| Test | Passed |")).toEqual([
     "Name Result\nTest Passed",
   ]);
+});
+
+it("bounds local generation segments without losing text or Unicode characters", () => {
+  const text = "Olá! Português com acentos e emojis 🙂. ".repeat(100);
+  const chunks = narrationChunks(text, "qwen");
+  expect(chunks.join("").replace(/\s/gu, "")).toBe(text.replace(/\s/gu, ""));
+  expect(chunks.every((chunk) => chunk.length <= QWEN_NARRATION_CHUNK_MAX_CHARACTERS)).toBe(true);
+  expect(chunks.length).toBeGreaterThan(narrationChunks(text, "elevenlabs").length);
 });

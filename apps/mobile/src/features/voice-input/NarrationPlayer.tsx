@@ -42,7 +42,7 @@ export function NarrationPlayer({
             </AppText>
             {state.errorAction === "speech-settings" ? (
               <Button
-                label="Fix credentials"
+                label="Speech settings"
                 tone="text"
                 onPress={() => {
                   controller.stop();

@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useSyncExternalStore } from "react";
 import { SquareIcon, Volume2Icon } from "lucide-react";
-import { type EnvironmentId } from "@t3tools/contracts";
+import { isNarrationConfigured, type EnvironmentId } from "@t3tools/contracts";
 import { speechContextAtom } from "~/state/speech";
 import { narrationAtom } from "~/state/narration";
 import { Button } from "../ui/button";
@@ -22,7 +22,7 @@ export function ReadAloudButton({
   const controller = useAtomValue(narrationAtom);
   const speech = useAtomValue(speechContextAtom);
   const speechEnvironmentId = speech.environmentId;
-  const configured = speech.narration?.credential;
+  const configured = isNarrationConfigured(speech.narration);
   const allowed = speech.canOperate;
   const key = `${speechEnvironmentId}:${environmentId}:${owner}`;
   const state = useSyncExternalStore(controller.subscribe, () => {
@@ -45,7 +45,9 @@ export function ReadAloudButton({
             data-speech-active={active || Boolean(error) ? "true" : undefined}
             disabled={!active && (!allowed || streaming || !text.trim())}
             onClick={() =>
-              active ? controller.stop() : void controller.start(key, text, speechEnvironmentId)
+              active
+                ? controller.stop()
+                : void controller.start(key, text, speechEnvironmentId, speech.narration?.provider)
             }
           />
         }

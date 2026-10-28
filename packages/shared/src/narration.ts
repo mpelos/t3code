@@ -1,4 +1,8 @@
-import { NARRATION_CHUNK_MAX_BYTES } from "@t3tools/contracts";
+import {
+  NARRATION_CHUNK_MAX_BYTES,
+  QWEN_NARRATION_CHUNK_MAX_CHARACTERS,
+  type NarrationSettings,
+} from "@t3tools/contracts";
 import type { Nodes } from "mdast";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
@@ -28,7 +32,12 @@ function readableText(node: Nodes): string {
     : text;
 }
 
-export function narrationChunks(markdown: string): ReadonlyArray<string> {
+export function narrationChunks(
+  markdown: string,
+  provider?: NarrationSettings["provider"],
+): ReadonlyArray<string> {
+  const maxCharacters =
+    provider === "qwen" ? QWEN_NARRATION_CHUNK_MAX_CHARACTERS : MAX_CHUNK_CHARACTERS;
   const text = readableText(parser.parse(markdown))
     .replace(/\n{3,}/gu, "\n\n")
     .trim();
@@ -40,7 +49,7 @@ export function narrationChunks(markdown: string): ReadonlyArray<string> {
     const size = encoder.encode(word).byteLength;
     if (
       bytes + size <= NARRATION_CHUNK_MAX_BYTES &&
-      current.length + word.length <= MAX_CHUNK_CHARACTERS
+      current.length + word.length <= maxCharacters
     ) {
       current += word;
       bytes += size;
@@ -53,7 +62,7 @@ export function narrationChunks(markdown: string): ReadonlyArray<string> {
       const size = encoder.encode(character).byteLength;
       if (
         bytes + size > NARRATION_CHUNK_MAX_BYTES ||
-        current.length + character.length > MAX_CHUNK_CHARACTERS
+        current.length + character.length > maxCharacters
       ) {
         chunks.push(current);
         current = "";

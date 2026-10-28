@@ -1,5 +1,5 @@
 import { Atom } from "effect/reactivity";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { isNarrationConfigured, type EnvironmentId } from "@t3tools/contracts";
 import {
   NarrationController,
   type NarrationPlaybackOptions,
@@ -74,16 +74,17 @@ export const narrationAtom = Atom.make((get) => {
     },
     play: playNarration,
   });
-  let environmentId = registry.get(speechContextAtom).environmentId;
+  let previous = registry.get(speechContextAtom);
   get.addFinalizer(
     registry.subscribe(speechContextAtom, (speech) => {
       if (
-        speech.environmentId !== environmentId ||
-        !speech.narration?.credential ||
+        speech.environmentId !== previous.environmentId ||
+        speech.narration?.provider !== previous.narration?.provider ||
+        !isNarrationConfigured(speech.narration) ||
         !speech.canOperate
       )
         controller.stop();
-      environmentId = speech.environmentId;
+      previous = speech;
     }),
   );
   get.addFinalizer(() => controller.stop());

@@ -43,12 +43,20 @@ vi.mock("~/state/server", async () => {
   const { Atom } = await import("effect/reactivity");
   const configValueAtom = Atom.family((id: string) =>
     Atom.make(
-      id === "speech-host"
+      id === "speech-host" || id === "qwen-host"
         ? {
             settings: {
               speech: {
                 dictation: { provider: "openai", credential: "stored", language: "pt-BR" },
-                narration: { provider: "elevenlabs", credential: "stored", voice: "voice-id" },
+                narration:
+                  id === "qwen-host"
+                    ? {
+                        provider: "qwen",
+                        baseUrl: "http://127.0.0.1:18320",
+                        voice: "Ryan",
+                        language: "Portuguese",
+                      }
+                    : { provider: "elevenlabs", credential: "stored", voice: "voice-id" },
               },
             },
           }
@@ -169,7 +177,7 @@ it("narrates through the selected Speech host and opens global narration setting
     environmentId: EnvironmentId.make("speech-host"),
     input: { text: "Hello", signal: expect.any(AbortSignal) },
   });
-  const fix = screen.getByRole("link", { name: "Fix credentials" });
+  const fix = screen.getByRole("link", { name: "Speech settings" });
   await expect.element(fix).toHaveAttribute("href", "/settings/general#speech-narration");
   await userEvent.click(fix);
   await expect.element(screen.getByRole("alert")).not.toBeInTheDocument();
@@ -194,69 +202,74 @@ it("hides both controls when the chosen Speech host is unconfigured, even if ano
   await expect.element(screen.getByRole("button", { name: "Read aloud" })).not.toBeInTheDocument();
 });
 
-it.each(["completion", "close", "environment change"] as const)(
-  "keeps the player when its message unmounts and cleans up on %s",
-  async (ending) => {
-    setup();
-    state.synthesize.mockResolvedValue(AsyncResult.success(new Uint8Array([1, 2, 3])));
-    const audio = document.createElement("audio");
-    await using screen = await render(
-      <>
-        <NarrationPlayer />
-        <ReadAloudButton
-          environmentId={EnvironmentId.make("agent-host")}
-          owner="reply"
-          text="Hello"
-          streaming={false}
-        />
-      </>,
-    );
-    using play = vi.spyOn(audio, "play").mockResolvedValue();
-    using pause = vi.spyOn(audio, "pause").mockImplementation(() => {});
-    using load = vi.spyOn(audio, "load").mockImplementation(() => {});
-    using _audio = vi.spyOn(window, "Audio").mockImplementation(function () {
-      return audio;
-    });
-    using revoke = vi.spyOn(URL, "revokeObjectURL");
-    await expect
-      .element(screen.getByRole("region", { name: "Read aloud player" }))
-      .not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Read aloud", exact: true }));
-    await expect
-      .element(screen.getByRole("button", { name: "Pause narration" }))
-      .toBeInTheDocument();
-    await vi.waitFor(() => expect(play).toHaveBeenCalledTimes(1));
-    await screen.rerender(<NarrationPlayer />);
-    await expect
-      .element(screen.getByRole("region", { name: "Read aloud player" }))
-      .toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Pause narration" }));
-    expect(pause).toHaveBeenCalledTimes(1);
-    await expect
-      .element(screen.getByRole("button", { name: "Resume narration" }))
-      .toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Playback speed 1x" }));
-    expect(audio.playbackRate).toBe(1.5);
-    await userEvent.click(screen.getByRole("button", { name: "Playback speed 1.5x" }));
-    expect(audio.playbackRate).toBe(2);
-    await userEvent.click(screen.getByRole("button", { name: "Playback speed 2x" }));
-    expect(audio.playbackRate).toBe(1);
-    await userEvent.click(screen.getByRole("button", { name: "Resume narration" }));
-    expect(play).toHaveBeenCalledTimes(2);
-    audio.currentTime = 65;
-    audio.dispatchEvent(new Event("timeupdate"));
-    await expect.element(screen.getByLabelText("Playback time")).toHaveTextContent("1:05");
-    if (ending === "completion") audio.dispatchEvent(new Event("ended"));
-    else if (ending === "close")
-      await userEvent.click(screen.getByRole("button", { name: "Close narration" }));
-    else await selectSpeechEnvironment(EnvironmentId.make("empty-host"));
-    await expect
-      .element(screen.getByRole("region", { name: "Read aloud player" }))
-      .not.toBeInTheDocument();
-    expect(revoke).toHaveBeenCalledTimes(1);
-    expect(load).toHaveBeenCalledTimes(1);
-  },
-);
+it.each([
+  { ending: "completion", source: "speech-host" },
+  { ending: "close", source: "speech-host" },
+  { ending: "environment change", source: "speech-host" },
+  { ending: "completion", source: "qwen-host" },
+])("keeps the player when its message unmounts and cleans up on %j", async ({ ending, source }) => {
+  setup();
+  await selectSpeechEnvironment(EnvironmentId.make(source));
+  state.synthesize.mockResolvedValue(AsyncResult.success(new Uint8Array([1, 2, 3])));
+  const audio = document.createElement("audio");
+  await using screen = await render(
+    <>
+      <NarrationPlayer />
+      <ReadAloudButton
+        environmentId={EnvironmentId.make("agent-host")}
+        owner="reply"
+        text="Hello"
+        streaming={false}
+      />
+    </>,
+  );
+  using play = vi.spyOn(audio, "play").mockResolvedValue();
+  using pause = vi.spyOn(audio, "pause").mockImplementation(() => {});
+  using load = vi.spyOn(audio, "load").mockImplementation(() => {});
+  using _audio = vi.spyOn(window, "Audio").mockImplementation(function () {
+    return audio;
+  });
+  using revoke = vi.spyOn(URL, "revokeObjectURL");
+  await expect
+    .element(screen.getByRole("region", { name: "Read aloud player" }))
+    .not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Read aloud", exact: true }));
+  await expect.element(screen.getByRole("button", { name: "Pause narration" })).toBeInTheDocument();
+  await vi.waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+  expect(state.synthesize).toHaveBeenCalledWith(expect.anything(), {
+    environmentId: EnvironmentId.make(source),
+    input: { text: "Hello", signal: expect.any(AbortSignal) },
+  });
+  await screen.rerender(<NarrationPlayer />);
+  await expect
+    .element(screen.getByRole("region", { name: "Read aloud player" }))
+    .toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Pause narration" }));
+  expect(pause).toHaveBeenCalledTimes(1);
+  await expect
+    .element(screen.getByRole("button", { name: "Resume narration" }))
+    .toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Playback speed 1x" }));
+  expect(audio.playbackRate).toBe(1.5);
+  await userEvent.click(screen.getByRole("button", { name: "Playback speed 1.5x" }));
+  expect(audio.playbackRate).toBe(2);
+  await userEvent.click(screen.getByRole("button", { name: "Playback speed 2x" }));
+  expect(audio.playbackRate).toBe(1);
+  await userEvent.click(screen.getByRole("button", { name: "Resume narration" }));
+  expect(play).toHaveBeenCalledTimes(2);
+  audio.currentTime = 65;
+  audio.dispatchEvent(new Event("timeupdate"));
+  await expect.element(screen.getByLabelText("Playback time")).toHaveTextContent("1:05");
+  if (ending === "completion") audio.dispatchEvent(new Event("ended"));
+  else if (ending === "close")
+    await userEvent.click(screen.getByRole("button", { name: "Close narration" }));
+  else await selectSpeechEnvironment(EnvironmentId.make("empty-host"));
+  await expect
+    .element(screen.getByRole("region", { name: "Read aloud player" }))
+    .not.toBeInTheDocument();
+  expect(revoke).toHaveBeenCalledTimes(1);
+  expect(load).toHaveBeenCalledTimes(1);
+});
 
 it("closes and cancels narration while audio is still being prepared", async () => {
   setup();

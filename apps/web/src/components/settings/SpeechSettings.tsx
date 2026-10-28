@@ -1,8 +1,13 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useState } from "react";
-import { type EnvironmentId, type SpeechSettings as SpeechConfig } from "@t3tools/contracts";
 import {
-  SPEECH_PROVIDERS,
+  QWEN_NARRATION_VOICES,
+  QWEN_NARRATION_LANGUAGES,
+  type EnvironmentId,
+  type SpeechSettings as SpeechConfig,
+} from "@t3tools/contracts";
+import {
+  speechProviderOptions,
   speechSettingsDraft,
   selectSpeechProvider,
   dictationSettingsFromDraft,
@@ -93,8 +98,8 @@ function SpeechForms({
   return (
     <>
       <p className="px-4 py-2 text-sm text-muted-foreground">
-        Recordings and response text are sent to your selected provider. Narration uses an
-        AI-generated voice.
+        Cloud providers receive your recordings or response text. Local narration runs on the
+        selected Speech environment.
       </p>
       <SpeechForm
         key={`dictation:${config.dictation?.provider}`}
@@ -173,9 +178,7 @@ function SpeechForm({
     >
       <div className="flex max-w-xl flex-col gap-3 py-3">
         <Select
-          items={SPEECH_PROVIDERS.filter(
-            (provider) => role === "narration" || provider.value !== "elevenlabs",
-          )}
+          items={speechProviderOptions(role)}
           value={draft.provider}
           onValueChange={(provider: SpeechProvider | null) => {
             if (provider) changeDraft(selectSpeechProvider(draft, provider));
@@ -186,9 +189,7 @@ function SpeechForm({
             <SelectValue />
           </SelectTrigger>
           <SelectPopup>
-            {SPEECH_PROVIDERS.filter(
-              (provider) => role === "narration" || provider.value !== "elevenlabs",
-            ).map((provider) => (
+            {speechProviderOptions(role).map((provider) => (
               <SelectItem key={provider.value} value={provider.value}>
                 {provider.label}
                 {role === "dictation" && provider.value === "openai" ? " Whisper" : ""}
@@ -198,20 +199,79 @@ function SpeechForm({
         </Select>
         {draft.provider !== "disabled" ? (
           <>
-            <SecretInput
-              aria-label={`${label} credentials`}
-              configured={Boolean(current?.provider === draft.provider && current.credential)}
-              value={draft.credential}
-              placeholder={draft.provider === "google" ? "Service account JSON" : "API key"}
-              disabled={disabled}
-              onChange={(event) => changeDraft({ ...draft, credential: event.target.value })}
-            />
+            {draft.provider !== "qwen" ? (
+              <SecretInput
+                aria-label={`${label} credentials`}
+                configured={Boolean(
+                  current?.provider === draft.provider &&
+                  "credential" in current &&
+                  current.credential,
+                )}
+                value={draft.credential}
+                placeholder={draft.provider === "google" ? "Service account JSON" : "API key"}
+                disabled={disabled}
+                onChange={(event) => changeDraft({ ...draft, credential: event.target.value })}
+              />
+            ) : null}
             {draft.provider === "google" ? (
               <p className="text-xs text-muted-foreground">
                 Paste a Google Cloud service account JSON key with access to{" "}
                 {role === "dictation" ? "Speech-to-Text v2" : "Text-to-Speech"}. Enable the
                 corresponding API and billing in its project.
               </p>
+            ) : null}
+            {draft.provider === "qwen" ? (
+              <>
+                <Input
+                  aria-label="Local voice server URL"
+                  placeholder="http://127.0.0.1:18320"
+                  value={draft.baseUrl}
+                  disabled={disabled}
+                  onChange={(event) => changeDraft({ ...draft, baseUrl: event.target.value })}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Run Qwen3-TTS with MLX Audio on the selected Speech environment. This address
+                  belongs to that environment, including when using mobile.
+                </p>
+                <Select
+                  items={QWEN_NARRATION_LANGUAGES.map((value) => ({ value, label: value }))}
+                  value={draft.language}
+                  disabled={disabled}
+                  onValueChange={(language) => {
+                    if (language) changeDraft({ ...draft, language });
+                  }}
+                >
+                  <SelectTrigger aria-label="Read aloud language">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {QWEN_NARRATION_LANGUAGES.map((language) => (
+                      <SelectItem key={language} value={language}>
+                        {language}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+                <Select
+                  items={QWEN_NARRATION_VOICES.map((value) => ({ value, label: value }))}
+                  value={draft.voice}
+                  disabled={disabled}
+                  onValueChange={(voice) => {
+                    if (voice) changeDraft({ ...draft, voice });
+                  }}
+                >
+                  <SelectTrigger aria-label="Narration voice">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {QWEN_NARRATION_VOICES.map((voice) => (
+                      <SelectItem key={voice} value={voice}>
+                        {voice}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </>
             ) : null}
             {role === "dictation" || draft.provider === "google" ? (
               <Input
@@ -222,7 +282,7 @@ function SpeechForm({
                 onChange={(event) => changeDraft({ ...draft, language: event.target.value })}
               />
             ) : null}
-            {role === "narration" ? (
+            {role === "narration" && draft.provider !== "qwen" ? (
               <Input
                 aria-label="Narration voice"
                 placeholder={draft.provider === "elevenlabs" ? "ElevenLabs voice ID" : "Voice name"}
@@ -240,8 +300,9 @@ function SpeechForm({
         ) : null}
         {draft.provider !== "disabled" ? (
           <p className="text-xs text-muted-foreground">
-            Saving tests your credentials with a short request to the selected provider and may use
-            credits.
+            {draft.provider === "qwen"
+              ? "Saving generates a short audio sample on the selected environment to verify the local model."
+              : "Saving tests your credentials with a short request to the selected provider and may use credits."}
           </p>
         ) : null}
         {!allowed ? (
@@ -251,7 +312,11 @@ function SpeechForm({
         ) : null}
         {saved ? (
           <p role="status" className="text-sm text-muted-foreground">
-            {draft.provider === "disabled" ? "Disabled." : "Credentials verified and saved."}
+            {draft.provider === "disabled"
+              ? "Disabled."
+              : draft.provider === "qwen"
+                ? "Local narration verified and saved."
+                : "Credentials verified and saved."}
           </p>
         ) : null}
         {error ? (
