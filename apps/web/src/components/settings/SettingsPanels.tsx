@@ -738,7 +738,6 @@ export function GeneralSettingsPanel() {
 
   return (
     <SettingsPageContainer>
-      <SpeechSettings />
       <SettingsSection id="notifications" title="Notifications">
         <NotificationSettings />
         <SettingsRow
@@ -1020,6 +1019,7 @@ export function GeneralSettingsPanel() {
           }
         />
       </SettingsSection>
+      <SpeechSettings />
     </SettingsPageContainer>
   );
 }
