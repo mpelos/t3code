@@ -1,3 +1,4 @@
+import { ReadAloudButton } from "../voice-input/ReadAloudButton";
 import { Button } from "../../components/ui/Button";
 import * as Dialog from "../../components/ui/Dialog";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
@@ -1848,6 +1849,12 @@ function renderFeedEntry(
               tintColor={iconSubtleColor}
               buttonSize={28}
               iconSize={13}
+            />
+            <ReadAloudButton
+              environmentId={props.environmentId}
+              owner={message.id}
+              text={renderedText}
+              streaming={Boolean(message.streaming)}
             />
             {message.projectedItem ? (
               <AssistantForkButton

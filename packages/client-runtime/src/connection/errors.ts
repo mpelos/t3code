@@ -243,6 +243,7 @@ export function mapRemoteEnvironmentError(
         hop: "server",
         via,
       });
+    case "SpeechError":
     case "RemoteEnvironmentAuthInvalidJsonError":
     case "RemoteEnvironmentAuthUndeclaredStatusError":
       return new ConnectionTransientError({

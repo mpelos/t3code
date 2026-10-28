@@ -173,27 +173,38 @@ Stashes containing uploaded files must be restored in their original environment
 Those files are retained for 24 hours. After an upload expires, restore the prompt
 and use **Attach again** or remove the missing file before sending.
 
-## Voice input on iPhone
+## Voice input and read aloud
 
-On supported iPhones with iOS 26 or later, use the composer's microphone to record,
-then confirm to transcribe. Text is inserted where your selection was when
-recording started, ready for you to review and edit before sending.
+In **Settings → General → Speech** on web or desktop, or the environment's settings
+on mobile, select the environment running your chats, then configure one provider
+for dictation and one for narration. Dictation
+supports OpenAI Whisper and Google Cloud Speech-to-Text. Narration supports OpenAI,
+ElevenLabs (Eleven v4), and Google Cloud Text-to-Speech. Each function can be disabled separately.
 
-The first use may download Apple's speech model and needs a network connection.
-Later transcription works offline for that language. Recordings can be up to five
-minutes long. Canceling, leaving the screen, or an audio interruption discards the
-recording and preserves your existing draft. While recording, the screen stays
-awake; it can sleep normally once recording stops.
+OpenAI and ElevenLabs use your API key; ElevenLabs also needs a voice ID. Google
+uses a service account JSON key from a project with billing and the corresponding
+API enabled. Choose a language code such as `pt-BR` for dictation, and a voice name
+and matching language for Google narration. Credentials are stored in the connected
+environment's secret store and are not sent back to clients.
 
-Voice input records from the first connected microphone in **Settings → Microphone**.
-The list mixes kinds (built-in, other wired, other Bluetooth, CarPlay) with wired and
-Bluetooth devices you have dictated with, listed by name. Drag to rank them together:
-for example, put **Other Bluetooth** above your AirPods so a new headset is preferred
-while the AirPods microphone stays low. By default, CarPlay comes after the built-in
-microphone. Swipe a device left to forget it.
+Use the composer's microphone to record, then confirm to transcribe into your draft.
+Review and edit the text before sending. Canceling discards the recording and keeps
+your draft. OpenAI recordings can be up to five minutes; Google recordings can be up
+to 60 seconds. Browsers require microphone permission and a secure connection
+(HTTPS or localhost).
 
-Transcription runs on your device. T3 Code deletes the temporary audio after
-transcription or cancellation; only the message text is sent when you submit.
+On mobile, **Settings → Microphone** lets you rank connected microphones. The list
+mixes microphone kinds with wired and Bluetooth devices you have dictated with.
+Swipe a device left to forget it.
+
+Use **Read aloud** beside a completed response's actions to hear an AI-generated
+voice. Press it again to stop. Long responses play in consecutive segments; code
+blocks are omitted from narration. Each audio action appears only when its
+respective provider is configured.
+
+Recordings and narration text are sent to the selected external provider and use
+its billing and data policies. T3 Code deletes temporary recordings after
+transcription or cancellation and does not add generated narration to thread history.
 
 ## Queued messages
 

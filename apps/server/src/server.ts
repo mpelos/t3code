@@ -1,3 +1,5 @@
+import * as Speech from "./speech/Speech.ts";
+import * as SpeechHttp from "./speech/http.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Random from "effect/Random";
@@ -721,6 +723,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(AuthHttp.layer),
       Layer.provide(McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer))),
       Layer.provide(CloudHttp.layer),
+      Layer.provide(SpeechHttp.layer.pipe(Layer.provide(Speech.layer))),
       Layer.provide(OrchestrationHttp.layer),
       Layer.provide(PullRequestHttp.layer),
       Layer.provide(ProjectHttp.layer),

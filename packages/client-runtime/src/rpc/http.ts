@@ -1,5 +1,6 @@
 import {
   EnvironmentHttpApi,
+  SpeechError,
   EnvironmentHttpCommonError,
   type EnvironmentAuthInvalidError,
   type EnvironmentInternalError,
@@ -18,6 +19,7 @@ import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientError } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
+const isSpeechError = Schema.is(SpeechError);
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
 
 export class RemoteEnvironmentAuthFetchError extends Data.TaggedError(
@@ -67,6 +69,7 @@ export class RemoteEnvironmentAuthTimeoutError extends Data.TaggedError(
 }
 
 export type RemoteEnvironmentRequestError =
+  | SpeechError
   | EnvironmentRequestInvalidError
   | EnvironmentAuthInvalidError
   | EnvironmentScopeRequiredError
@@ -125,6 +128,7 @@ const failRemoteRequest = (
   if (cause instanceof RemoteEnvironmentAuthTimeoutError) {
     return Effect.fail(cause);
   }
+  if (isSpeechError(cause)) return Effect.fail(cause);
   if (isEnvironmentHttpCommonError(cause)) {
     return Effect.fail(cause);
   }

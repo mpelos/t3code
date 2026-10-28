@@ -17,3 +17,14 @@ export {
   type VoiceTranscriptionErrorCode,
   type VoiceTranscriptionOptions,
 } from "./transcription.ts";
+
+export { NarrationController } from "./narration.ts";
+export {
+  SPEECH_PROVIDERS,
+  speechSettingsDraft,
+  selectSpeechProvider,
+  dictationSettingsFromDraft,
+  narrationSettingsFromDraft,
+  type SpeechSettingsDraft,
+  type SpeechProvider,
+} from "./settings.ts";

@@ -1,3 +1,4 @@
+import type { EnvironmentId } from "@t3tools/contracts";
 import {
   VOICE_RECORDING_LIMIT_SECONDS,
   VoiceInputController,
@@ -15,6 +16,7 @@ const IDLE_STATE: VoiceInputState = { phase: "idle", error: null, errorAction: n
 const SILENT_LEVELS: ReadonlyArray<number> = Array<number>(VOICE_WAVEFORM_SAMPLE_COUNT).fill(0);
 
 export type VoiceInputTarget = {
+  readonly environmentId: EnvironmentId;
   readonly ownerKey: string;
   readonly label?: string;
   readonly readDraft: () => VoiceDraftSnapshot | null;
@@ -37,8 +39,11 @@ export type VoiceRecordingSample = {
 
 export type VoiceInputSessionDependencies = Omit<
   VoiceInputControllerDependencies,
-  "readDraft" | "commitDraft" | "onStateChange"
+  "readDraft" | "commitDraft" | "onStateChange" | "getTranscriber"
 > & {
+  readonly getTranscriber: (
+    target: VoiceInputTarget | null,
+  ) => ReturnType<VoiceInputControllerDependencies["getTranscriber"]>;
   /** Reads the live recorder, or null when it is not capturing. */
   readonly sampleRecording: () => VoiceRecordingSample | null;
   /** Levels change every metering tick, so they bypass React state. */
@@ -48,6 +53,7 @@ export type VoiceInputSessionDependencies = Omit<
 };
 
 export function createVoiceInputTarget(
+  environmentId: EnvironmentId,
   ownerKey: string,
   readText: () => string | null,
   commitDraft: VoiceInputTarget["commitDraft"],
@@ -56,6 +62,7 @@ export function createVoiceInputTarget(
 ): VoiceInputTarget {
   let revision = 0;
   return {
+    environmentId,
     ownerKey,
     readDraft: () => {
       const text = readText();
@@ -101,10 +108,15 @@ export class VoiceInputSession {
     this.dependencies = dependencies;
     this.controller = new VoiceInputController({
       ...dependencies,
+      getTranscriber: () => dependencies.getTranscriber(this.target),
       onStateChange: (state) => this.handleStateChange(state),
       readDraft: () => this.target?.readDraft() ?? null,
       commitDraft: (text, selection) => this.target?.commitDraft(text, selection),
     });
+  }
+
+  get environmentId(): EnvironmentId | null {
+    return this.target?.environmentId ?? null;
   }
 
   get ownerKey(): string | null {

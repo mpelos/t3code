@@ -1,3 +1,5 @@
+import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { useEnvironmentScope } from "../../state/session";
 import { useAtomValue } from "@effect/atom-react";
 import {
   AudioModule,
@@ -17,10 +19,15 @@ import {
   preferredMicrophoneInput,
   rememberMicrophones,
 } from "../../lib/microphonePriority";
-import { getLocalVoiceTranscriber } from "../../native/voiceTranscription";
+import { serverEnvironment } from "../../state/server";
+import { speechEnvironment } from "../../state/speech";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
-import { getNativeShowcaseScene } from "../showcase/nativeShowcaseScene";
-import { voiceInputBlocksSubmission } from "@t3tools/client-runtime/voice-input";
+import {
+  VoiceTranscriptionError,
+  throwIfVoiceTranscriptionAborted,
+  voiceInputBlocksSubmission,
+} from "@t3tools/client-runtime/voice-input";
 import { createLazyVoiceRecorder } from "./lazyVoiceRecorder";
 import { VOICE_WAVEFORM_SAMPLE_COUNT } from "./voiceInputMetering";
 import { VoiceInputSession } from "./voiceInputSession";
@@ -91,7 +98,34 @@ const voiceInputAtom = Atom.make((get) => {
   });
   const session: VoiceInputSession = new VoiceInputSession({
     recorder,
-    getTranscriber: getLocalVoiceTranscriber,
+    getTranscriber: (target) => {
+      if (!target) return null;
+      const config = registry.get(serverEnvironment.configValueAtom(target.environmentId))?.settings
+        .speech.dictation;
+      if (!config?.credential) return null;
+      return {
+        prepare: async () => ({
+          locale: config.language,
+          maxRecordingSeconds: config.provider === "google" ? 60 : 300,
+          transcribe: async (uri, { signal }) => {
+            throwIfVoiceTranscriptionAborted(signal);
+            const result = await speechEnvironment.transcribe.run(registry, {
+              environmentId: target.environmentId,
+              input: { audio: await new File(uri).bytes(), format: "m4a", signal },
+            });
+            if (result._tag === "Failure") {
+              const cause = squashAtomCommandFailure(result);
+              throw new VoiceTranscriptionError(
+                "transcription-failed",
+                cause instanceof Error ? cause.message : "Could not transcribe this recording.",
+                { cause },
+              );
+            }
+            return result.value.text;
+          },
+        }),
+      };
+    },
     requestPermission: async () => {
       const permission = await requestRecordingPermissionsAsync();
       return { granted: permission.granted, canAskAgain: permission.canAskAgain };
@@ -137,9 +171,11 @@ const voiceInputAtom = Atom.make((get) => {
 export function useGlobalVoiceInput() {
   const { session, audioLevels } = useAtomValue(voiceInputAtom);
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
+  const config = useAtomValue(serverEnvironment.configValueAtom(session.environmentId));
+  const allowed = useEnvironmentScope(session.environmentId, AuthOrchestrationOperateScope);
   return {
     ...snapshot,
-    isAvailable: getLocalVoiceTranscriber() !== null || getNativeShowcaseScene() !== null,
+    isAvailable: Boolean(config?.settings.speech.dictation?.credential && allowed),
     audioLevels,
     isBusy: voiceInputBlocksSubmission(snapshot.state),
     session,

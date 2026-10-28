@@ -843,6 +843,40 @@ export const AntigravitySettings = makeProviderSettingsSchema(
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
 
+const SpeechCredential = TrimmedString.pipe(secretSetting);
+
+export const DictationSettings = Schema.Struct({
+  provider: Schema.Literals(["openai", "google"]),
+  credential: SpeechCredential,
+  language: TrimmedNonEmptyString,
+});
+export type DictationSettings = typeof DictationSettings.Type;
+
+export const NarrationSettings = Schema.Union([
+  Schema.Struct({
+    provider: Schema.Literals(["openai", "elevenlabs"]),
+    credential: SpeechCredential,
+    voice: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    provider: Schema.Literal("google"),
+    credential: SpeechCredential,
+    voice: TrimmedNonEmptyString,
+    language: TrimmedNonEmptyString,
+  }),
+]);
+export type NarrationSettings = typeof NarrationSettings.Type;
+
+export const SpeechSettings = Schema.Struct({
+  dictation: Schema.NullOr(DictationSettings).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  narration: Schema.NullOr(NarrationSettings).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+});
+export type SpeechSettings = typeof SpeechSettings.Type;
+
 export const UsageLimitSourceConfig = Schema.Struct({
   kind: Schema.Literal("cliproxy"),
   label: Schema.optional(TrimmedNonEmptyString),
@@ -1139,6 +1173,9 @@ export const StorageCleanupSettings = Schema.Struct({
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
 export const ServerSettings = Schema.Struct({
+  speech: SpeechSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed({ dictation: null, narration: null })),
+  ),
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   providerModelPreferences: Schema.NullOr(ProviderModelPreferences).pipe(
@@ -1468,6 +1505,12 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  speech: Schema.optionalKey(
+    Schema.Struct({
+      dictation: Schema.optionalKey(Schema.NullOr(DictationSettings)),
+      narration: Schema.optionalKey(Schema.NullOr(NarrationSettings)),
+    }),
+  ),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),

@@ -77,7 +77,7 @@ Open **Settings > Storage** and turn on automatic worktree cleanup. You can also
 
 ## Is there voice input?
 
-On iPhone, yes. You need iOS 26 or later. Tap the mic in the composer, talk, check the text, then send. Web, desktop, and Android do not have it yet. [Voice input on iPhone](./composer.md#voice-input-on-iphone)
+Yes, on web, desktop, iPhone, and Android. Configure a dictation provider in your environment’s speech settings, then use the microphone to fill an editable draft. You can also configure narration to listen to agent responses. [Voice input and read aloud](./composer.md#voice-input-and-read-aloud)
 
 ## Does it work on Windows, Mac, and Linux?
 

@@ -502,6 +502,10 @@
     "./provider-clients": {
       "types": "./src/providerClients.ts",
       "default": "./src/providerClients.ts"
+    },
+    "./state/speech": {
+      "types": "./src/state/speech.ts",
+      "default": "./src/state/speech.ts"
     }
   },
   "scripts": {

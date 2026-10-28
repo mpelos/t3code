@@ -218,27 +218,37 @@ describe("VoiceInputController", () => {
     },
   );
 
-  it("uses the native five-minute cap and commits one final transcript", async () => {
-    const harness = createHarness();
-    await harness.controller.start();
-    expect(harness.recorder.record).toHaveBeenCalledWith({
-      forDuration: VOICE_RECORDING_LIMIT_SECONDS,
-    });
+  it.each([undefined, 60])(
+    "uses the provider recording limit %s and commits one final transcript",
+    async (maxRecordingSeconds) => {
+      const harness = createHarness({
+        getTranscriber: () => ({
+          prepare: async () => ({
+            ...preparedTranscription(),
+            ...(maxRecordingSeconds === undefined ? {} : { maxRecordingSeconds }),
+          }),
+        }),
+      });
+      await harness.controller.start();
+      expect(harness.recorder.record).toHaveBeenCalledWith({
+        forDuration: maxRecordingSeconds ?? VOICE_RECORDING_LIMIT_SECONDS,
+      });
 
-    const stopping = harness.controller.stop();
-    harness.controller.handleRecorderStatus({
-      isFinished: true,
-      hasError: false,
-      error: null,
-      url: "file:///voice.m4a",
-    });
-    await stopping;
+      const stopping = harness.controller.stop();
+      harness.controller.handleRecorderStatus({
+        isFinished: true,
+        hasError: false,
+        error: null,
+        url: "file:///voice.m4a",
+      });
+      await stopping;
 
-    expect(harness.commits).toEqual([
-      { text: "hello new text", selection: { start: 14, end: 14 } },
-    ]);
-    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
-  });
+      expect(harness.commits).toEqual([
+        { text: "hello new text", selection: { start: 14, end: 14 } },
+      ]);
+      expect(harness.deleted).toEqual(["file:///voice.m4a"]);
+    },
+  );
 
   it.each(["cancel", "dispose", "ownerChanged"] as const)(
     "queues the next recording after %s until transcription and audio cleanup settle",

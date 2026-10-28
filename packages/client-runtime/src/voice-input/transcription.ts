@@ -4,6 +4,7 @@ export type VoiceTranscriptionOptions = {
 };
 
 export type PreparedVoiceTranscription = {
+  readonly maxRecordingSeconds?: number;
   readonly locale: string;
   readonly transcribe: (uri: string, options: VoiceTranscriptionOptions) => Promise<string>;
 };
@@ -12,12 +13,7 @@ export type VoiceTranscriber = {
   readonly prepare: (options: VoiceTranscriptionOptions) => Promise<PreparedVoiceTranscription>;
 };
 
-export type VoiceTranscriptionErrorCode =
-  | "unavailable"
-  | "unsupported-locale"
-  | "preparation-failed"
-  | "transcription-failed"
-  | "cancelled";
+export type VoiceTranscriptionErrorCode = "transcription-failed" | "cancelled";
 
 export class VoiceTranscriptionError extends Error {
   readonly code: VoiceTranscriptionErrorCode;

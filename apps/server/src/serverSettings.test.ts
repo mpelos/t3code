@@ -1829,3 +1829,43 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(layerServerSettings())),
   );
 });
+
+it.effect(
+  "stores speech credentials in the vault, preserves them on redacted edits, and removes retired providers",
+  () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const saved = yield* settings.updateSettings({
+        speech: {
+          dictation: { provider: "openai", credential: "dictation-secret", language: "pt-BR" },
+          narration: { provider: "elevenlabs", credential: "narration-secret", voice: "voice-1" },
+        },
+      });
+      const raw = yield* fs.readFileString(config.settingsPath);
+      assert.notInclude(raw, "dictation-secret");
+      assert.notInclude(raw, "narration-secret");
+      const redacted = ServerSettingsModule.redactServerSettingsForClient(saved).speech;
+      assert.notEqual(redacted.dictation?.credential, "dictation-secret");
+      yield* settings.updateSettings({
+        speech: { narration: redacted.narration && { ...redacted.narration, voice: "voice-2" } },
+      });
+      const kept = (yield* settings.getSettings).speech;
+      assert.equal(kept.dictation?.credential, "dictation-secret");
+      assert.equal(kept.narration?.credential, "narration-secret");
+      yield* settings.updateSettings({
+        speech: {
+          dictation: { provider: "google", credential: "google-secret", language: "pt-BR" },
+        },
+      });
+      assert.isTrue(Option.isNone(yield* secrets.get("speech-dictation-openai")));
+      assert.isTrue(Option.isSome(yield* secrets.get("speech-dictation-google")));
+      yield* settings.updateSettings({ speech: { narration: null } });
+      assert.isTrue(Option.isNone(yield* secrets.get("speech-narration-elevenlabs")));
+      assert.equal((yield* settings.getSettings).speech.dictation?.credential, "google-secret");
+    }).pipe(
+      Effect.provide(layerServerSettingsWithSecrets().pipe(Layer.provideMerge(NodeServices.layer))),
+    ),
+);

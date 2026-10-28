@@ -1,3 +1,4 @@
+import { ReadAloudButton } from "./ReadAloudButton";
 import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/markdownPipeline";
 import { type RunId } from "@t3tools/contracts";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
@@ -177,6 +178,12 @@ function AssistantMessageMeta({
         message={message}
         showCopyButton={showCopyButton}
         streaming={copyStreaming}
+      />
+      <ReadAloudButton
+        environmentId={ctx.activeThreadEnvironmentId}
+        owner={message.id}
+        text={message.text ?? ""}
+        streaming={copyStreaming || Boolean(message.streaming)}
       />
       {projectedItem?.item.type === "assistant_message" ? (
         <AssistantForkButton projectedItem={projectedItem} />

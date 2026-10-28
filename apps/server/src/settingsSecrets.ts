@@ -155,5 +155,30 @@ export function mapSettingsSecrets(
       ) as EasDeviceHostConfig,
   );
 
-  return { ...settings, providerInstances, sourceControlHosts, usageLimitSources, easDeviceHosts };
+  const mapSpeech = <T extends { readonly provider: string; readonly credential: string }>(
+    role: string,
+    config: T | null,
+  ): T | null => {
+    if (config === null) return null;
+    const result = map({
+      secretName: `speech-${role}-${config.provider}`,
+      kind: "field",
+      value: config.credential,
+      redacted: config.credential === SECRET_REDACTED,
+      sensitive: true,
+    });
+    return { ...config, credential: result.redacted ? SECRET_REDACTED : result.value };
+  };
+  const speech = {
+    dictation: mapSpeech("dictation", settings.speech.dictation),
+    narration: mapSpeech("narration", settings.speech.narration),
+  };
+  return {
+    ...settings,
+    speech,
+    providerInstances,
+    sourceControlHosts,
+    usageLimitSources,
+    easDeviceHosts,
+  };
 }

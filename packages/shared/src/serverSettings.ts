@@ -343,6 +343,7 @@ export function applyServerSettingsPatch(
   const patch = translateLegacyProjectOverridePatch(current, rawPatch);
   const selectionPatch = patch.textGenerationModelSelection;
   const {
+    speech,
     migrateModelPreferences,
     setModelFavorites,
     setModelsHidden,
@@ -455,6 +456,7 @@ export function applyServerSettingsPatch(
   const next = deepMerge(current, patchForMerge);
   const nextWithReplacementsBase = {
     ...next,
+    ...(speech === undefined ? {} : { speech: { ...current.speech, ...speech } }),
     favorites,
     providerModelPreferences: nextModelPreferences,
     ...(worktreeCleanupPatch === undefined

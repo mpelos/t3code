@@ -554,6 +554,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
       usageLimitsOffered && draftAttachments.length === 0 ? openUsageLimits : undefined,
   });
   const voiceInput = useVoiceInputController({
+    environmentId: props.environmentId,
     ownerKey: composerDraftKey,
     label: props.selectedThread.title || "Untitled thread",
     readDraftMessage: () => getComposerDraftSnapshot(composerDraftKey).text,

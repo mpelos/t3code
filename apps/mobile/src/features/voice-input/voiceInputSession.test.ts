@@ -1,3 +1,4 @@
+import { EnvironmentId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { PreparedVoiceTranscription } from "@t3tools/client-runtime/voice-input";
 import { Atom, AtomRegistry } from "effect/reactivity";
@@ -33,7 +34,14 @@ function createTarget(
   commit: VoiceInputTarget["commitDraft"],
   selection: { start: number; end: number },
 ) {
-  return createVoiceInputTarget(ownerKey, readText, commit, selection, () => () => {});
+  return createVoiceInputTarget(
+    EnvironmentId.make("voice-test"),
+    ownerKey,
+    readText,
+    commit,
+    selection,
+    () => () => {},
+  );
 }
 
 function createSession(
@@ -276,6 +284,7 @@ describe("global voice input", () => {
     const { session } = createSession();
     const commit = vi.fn();
     const target = createVoiceInputTarget(
+      EnvironmentId.make("voice-test"),
       "first",
       () => registry.get(draft),
       commit,

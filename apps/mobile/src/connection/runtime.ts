@@ -1,3 +1,4 @@
+import * as SpeechClient from "@t3tools/client-runtime/state/speech";
 import { Connection } from "@t3tools/client-runtime/connection";
 import { ShellSnapshotLoader } from "@t3tools/client-runtime/state/shell";
 import { PullRequestDiffLoader } from "@t3tools/client-runtime/state/pull-requests";
@@ -20,6 +21,7 @@ declare const module: { readonly hot?: FoundationHotModule } | undefined;
 const layerProvidedConnectionPlatform = ConnectionPlatform.layer.pipe(Layer.provide(Runtime.layer));
 
 const layerSnapshotLoader = Layer.mergeAll(
+  SpeechClient.layer,
   PullRequestDiffLoader.layer,
   BoundedThreadSnapshotLoader.layer,
   ShellSnapshotLoader.layer,

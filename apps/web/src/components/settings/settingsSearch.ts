@@ -207,6 +207,23 @@ const SOURCE_CONTROL_HOST_TERMS = sourceControlClients.definitions
 
 export const SETTINGS_SEARCH_ITEMS = [
   {
+    id: "speech",
+    title: "Speech",
+    to: "/settings/general",
+    scope: "environment",
+    searchTerms: [
+      "audio",
+      "dictation",
+      "microphone",
+      "whisper",
+      "read aloud",
+      "narration",
+      "elevenlabs",
+      "text to speech",
+      "transcription",
+    ],
+  },
+  {
     id: "storage-worktree-keep-when",
     targetId: "storage-worktrees",
     title: "Keep worktrees with local changes",

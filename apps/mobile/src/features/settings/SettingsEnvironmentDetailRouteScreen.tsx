@@ -1,3 +1,4 @@
+import { SpeechSettingsSection } from "./SpeechSettingsSection";
 import * as Dialog from "../../components/ui/Dialog";
 import { useAtom, useAtomValue } from "@effect/atom-react";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
@@ -361,6 +362,7 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
             ) : null}
           </>
         )}
+        <SpeechSettingsSection environmentId={environmentId} />
       </ScreenScrollView>
     </SettingsScreen>
   );

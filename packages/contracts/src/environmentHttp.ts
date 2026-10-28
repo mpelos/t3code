@@ -1,3 +1,4 @@
+import { SpeechError, SpeechAudioFormat, NarrationInput } from "./speech.ts";
 import * as Context from "effect/Context";
 import type * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
@@ -835,7 +836,27 @@ class EnvironmentWebhooksHttpApi extends HttpApiGroup.make("webhooks")
   .add(HttpApiEndpoint.patch("webhookPatch", WEBHOOK_PATH, webhookEndpoint))
   .add(HttpApiEndpoint.get("webhookGet", WEBHOOK_PATH, webhookEndpoint)) {}
 
+class EnvironmentSpeechHttpApi extends HttpApiGroup.make("speech")
+  .add(
+    HttpApiEndpoint.post("transcribe", "/api/speech/transcribe", {
+      headers: OptionalBearerHeaders,
+      query: Schema.Struct({ format: SpeechAudioFormat }),
+      payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
+      success: Schema.Struct({ text: Schema.String }),
+      error: [SpeechError, EnvironmentScopeRequiredError, ...EnvironmentAuthenticationErrors],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("narrate", "/api/speech/narrate", {
+      headers: OptionalBearerHeaders,
+      payload: NarrationInput,
+      success: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "audio/mpeg" })),
+      error: [SpeechError, EnvironmentScopeRequiredError, ...EnvironmentAuthenticationErrors],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 export class EnvironmentHttpApi extends HttpApi.make("environment")
+  .add(EnvironmentSpeechHttpApi)
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
   .add(EnvironmentMcpOAuthHttpApi)

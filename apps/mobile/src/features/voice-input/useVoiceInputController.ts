@@ -1,3 +1,7 @@
+import { useAtomValue } from "@effect/atom-react";
+import { AuthOrchestrationOperateScope, type EnvironmentId } from "@t3tools/contracts";
+import { serverEnvironment } from "../../state/server";
+import { useEnvironmentScope } from "../../state/session";
 import { useFocusEffect } from "@react-navigation/native";
 import { useCallback, useEffect, useRef } from "react";
 import {
@@ -12,6 +16,7 @@ import { createVoiceInputTarget } from "./voiceInputSession";
 const IDLE_STATE: VoiceInputState = { phase: "idle", error: null, errorAction: null };
 
 export function useVoiceInputController(input: {
+  readonly environmentId: EnvironmentId | null;
   readonly ownerKey: string | null;
   readonly label: string;
   readonly readDraftMessage: () => string | null;
@@ -22,6 +27,8 @@ export function useVoiceInputController(input: {
   readonly onChangeSelection: (selection: ComposerEditorSelection) => void;
 }) {
   const global = useGlobalVoiceInput();
+  const config = useAtomValue(serverEnvironment.configValueAtom(input.environmentId));
+  const allowed = useEnvironmentScope(input.environmentId, AuthOrchestrationOperateScope);
   const { session } = global;
   const latestInput = useRef(input);
   // oxlint-disable-next-line react/refs -- Transcription finishes asynchronously and must reach the composer's current selection setter, not the one captured at start.
@@ -46,9 +53,10 @@ export function useVoiceInputController(input: {
 
   const start = useCallback(() => {
     const captured = latestInput.current;
-    if (!captured.ownerKey || captured.disabled) return;
+    if (!captured.environmentId || !captured.ownerKey || captured.disabled || !allowed) return;
     void session.start({
       ...createVoiceInputTarget(
+        captured.environmentId,
         captured.ownerKey,
         captured.readDraftMessage,
         (text, selection) => {
@@ -62,11 +70,13 @@ export function useVoiceInputController(input: {
       ),
       label: captured.label,
     });
-  }, [session]);
+  }, [session, allowed]);
   const state = global.ownerKey === input.ownerKey ? global.state : IDLE_STATE;
   const isBusy = voiceInputBlocksSubmission(state);
   return {
-    isAvailable: global.isAvailable && (!global.isBusy || global.ownerKey === input.ownerKey),
+    isAvailable:
+      Boolean(config?.settings.speech.dictation?.credential && allowed) &&
+      (!global.isBusy || global.ownerKey === input.ownerKey),
     state,
     audioLevels: global.audioLevels,
     elapsedSeconds: global.elapsedSeconds,

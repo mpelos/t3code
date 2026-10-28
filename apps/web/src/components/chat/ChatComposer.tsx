@@ -1,3 +1,5 @@
+import { useWebDictation } from "./useWebDictation";
+import { DictationControl } from "./DictationControl";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
@@ -1027,6 +1029,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     pendingUserInputs.length === 0;
 
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
+  const voice = useWebDictation({
+    environmentId,
+    ownerKey: composerDraftTargetKey,
+    readDraft: () => ({
+      ownerKey: composerDraftTargetKey,
+      text: promptRef.current,
+      selection: composerEditorRef.current?.readSelectionRange() ?? {
+        start: promptRef.current.length,
+        end: promptRef.current.length,
+      },
+      revision: 0,
+    }),
+    commitDraft: (text, selection) => {
+      promptRef.current = text;
+      setComposerDraftPrompt(composerDraftTarget, text);
+      setComposerCursor(selection.start);
+      composerEditorRef.current?.focusAt(selection.start);
+    },
+  });
   const pasteAsTextShortcutUntilRef = useRef(0);
   const composerFormRef = useRef<HTMLFormElement>(null);
   const composerSurfaceRef = useRef<HTMLDivElement>(null);
@@ -2046,6 +2067,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     submissionIntent?: ComposerSubmissionIntent,
   ) => {
     if (
+      voice.isBusy ||
       noProviderAvailable ||
       isSendDisabled ||
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
@@ -3213,11 +3235,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     (showProviderUnavailable ? "Enable a provider in Settings" : "Ask anything...")}
                 </button>
                 {collapsedComposerImagePreviews}
+                <DictationControl
+                  voice={voice}
+                  disabled={!canOperateThread || isSendBusy || environmentUnavailable !== null}
+                />
                 <button
                   type="button"
                   data-chat-composer-transition-actions="true"
                   className="flex size-8 shrink-0 items-center justify-center rounded-full bg-message-action text-message-action-foreground hover:bg-message-action-hover disabled:opacity-64"
-                  disabled={collapsedComposerPrimaryActionDisabled}
+                  disabled={collapsedComposerPrimaryActionDisabled || voice.isBusy}
                   aria-label={collapsedComposerPrimaryActionLabel}
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={(event) => {
@@ -3378,6 +3404,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                                 : DEFAULT_COMPOSER_PLACEHOLDER
                     }
                     disabled={
+                      voice.isBusy ||
                       projectSelectionRequired ||
                       isChoiceOnlyPendingQuestion ||
                       activePendingIsResponding
@@ -3398,7 +3425,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
                       isSendBusy={isSendBusy}
-                      sendDisabledReason={sendDisabledReason}
+                      sendDisabledReason={
+                        voice.isBusy ? "Finish dictation first." : sendDisabledReason
+                      }
                       isEnvironmentUnavailable={
                         environmentUnavailable !== null ||
                         noProviderAvailable ||
@@ -3479,7 +3508,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                     promptHasText={prompt.trim().length > 0}
                     isSendBusy={isSendBusy}
-                    sendDisabledReason={sendDisabledReason}
+                    sendDisabledReason={
+                      voice.isBusy ? "Finish dictation first." : sendDisabledReason
+                    }
                     isEnvironmentUnavailable={
                       environmentUnavailable !== null ||
                       noProviderAvailable ||
@@ -3503,7 +3534,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     {...(compactCommandAvailable
                       ? { onCompactContext: compactThreadContextStable }
                       : {})}
-                  />
+                  >
+                    <DictationControl
+                      voice={voice}
+                      disabled={
+                        !canOperateThread ||
+                        isSendBusy ||
+                        pendingPrimaryAction !== null ||
+                        environmentUnavailable !== null
+                      }
+                    />
+                  </ComposerFooterPrimaryActions>
                 </div>
               </div>
             )}
