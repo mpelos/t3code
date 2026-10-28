@@ -1,4 +1,5 @@
 import { ReadAloudButton } from "../voice-input/ReadAloudButton";
+import { NarrationPlayer } from "../voice-input/NarrationPlayer";
 import { Button } from "../../components/ui/Button";
 import * as Dialog from "../../components/ui/Dialog";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
@@ -3196,15 +3197,21 @@ export const ThreadFeed = memo(function ThreadFeed({
     </Animated.View>
   );
 
+  const narrationPlayer = (
+    <NarrationPlayer top={topContentInset} left={contentLeftInset} right={contentRightInset} />
+  );
   if (props.contentPresentation.kind === "unavailable" && props.queuedMessages.length === 0) {
     return (
-      <ThreadFeedPlaceholder
-        title={props.contentPresentation.title}
-        detail={props.contentPresentation.detail}
-        topInset={topContentInset}
-        bottomInset={bottomContentInset}
-        horizontalPadding={horizontalPadding}
-      />
+      <View className="flex-1">
+        <ThreadFeedPlaceholder
+          title={props.contentPresentation.title}
+          detail={props.contentPresentation.detail}
+          topInset={topContentInset}
+          bottomInset={bottomContentInset}
+          horizontalPadding={horizontalPadding}
+        />
+        {narrationPlayer}
+      </View>
     );
   }
 
@@ -3357,6 +3364,7 @@ export const ThreadFeed = memo(function ThreadFeed({
             />
           </View>
         ) : null}
+        {narrationPlayer}
         <VideoPreviewModal source={expandedVideo} onRequestClose={closeVideoPreview} />
         <FilePreviewModal source={expandedFile} onRequestClose={closeFilePreview} />
       </View>

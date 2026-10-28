@@ -18,7 +18,7 @@ export {
   type VoiceTranscriptionOptions,
 } from "./transcription.ts";
 
-export { NarrationController } from "./narration.ts";
+export { NarrationController, type NarrationPlaybackOptions } from "./narration.ts";
 export {
   SPEECH_PROVIDERS,
   speechSettingsDraft,

@@ -20,7 +20,8 @@ it.each(["loading", "playing"] as const)(
         }
         return new Uint8Array([2]);
       },
-      play: async (audio) => {
+      play: async (audio, _signal, options) => {
+        options.onReady({ setPaused: () => {}, setRate: () => {} });
         played.push(audio[0] ?? 0);
         if (audio[0] === 1) {
           entered.resolve();
@@ -30,6 +31,7 @@ it.each(["loading", "playing"] as const)(
     });
     const first = controller.start("first", "First response", "first");
     await entered.promise;
+    expect(controller.getSnapshot().phase).toBe(phase);
     await controller.start("second", "Second response", "second");
     finish.resolve(new Uint8Array([1]));
     playFinished.resolve();
@@ -40,6 +42,9 @@ it.each(["loading", "playing"] as const)(
       phase: "idle",
       error: null,
       errorAction: null,
+      paused: false,
+      rate: 1,
+      elapsedSeconds: 0,
     });
   },
 );
@@ -58,6 +63,104 @@ it("plays long responses in order and stops before requesting more audio on fail
     owner: "reply",
     phase: "idle",
     error: "Audio device unavailable",
+  });
+});
+
+it("keeps pause, speed and elapsed time across audio segments, then closes without playing more", async () => {
+  const firstReady = Promise.withResolvers<void>();
+  const secondRequested = Promise.withResolvers<void>();
+  const secondAudio = Promise.withResolvers<Uint8Array>();
+  const secondReady = Promise.withResolvers<void>();
+  const firstFinished = Promise.withResolvers<void>();
+  const secondFinished = Promise.withResolvers<void>();
+  const firstPaused = vi.fn();
+  const firstRate = vi.fn();
+  const secondPaused = vi.fn();
+  const secondRate = vi.fn();
+  const synthesize = vi.fn(async () => {
+    if (synthesize.mock.calls.length === 1) return new Uint8Array([1]);
+    secondRequested.resolve();
+    return secondAudio.promise;
+  });
+  const controller = new NarrationController<void>({
+    synthesize,
+    play: async (audio, signal, options) => {
+      if (audio[0] === 1) {
+        options.onReady({ setPaused: firstPaused, setRate: firstRate });
+        options.onProgress(12.8);
+        firstReady.resolve();
+        await firstFinished.promise;
+      } else {
+        signal.addEventListener("abort", () => secondFinished.resolve(), { once: true });
+        options.onReady({ setPaused: secondPaused, setRate: secondRate });
+        options.onProgress(3.5);
+        secondReady.resolve();
+        await secondFinished.promise;
+        options.onProgress(100);
+      }
+    },
+  });
+  const reading = controller.start("reply", "A long response. ".repeat(1000), undefined);
+  await firstReady.promise;
+  controller.togglePaused();
+  expect(firstPaused).toHaveBeenLastCalledWith(true);
+  controller.cycleRate();
+  expect(firstRate).toHaveBeenLastCalledWith(1.5);
+  controller.cycleRate();
+  expect(firstRate).toHaveBeenLastCalledWith(2);
+  controller.togglePaused();
+  expect(firstPaused).toHaveBeenLastCalledWith(false);
+  firstFinished.resolve();
+  await secondRequested.promise;
+  controller.togglePaused();
+  secondAudio.resolve(new Uint8Array([2]));
+  await secondReady.promise;
+  expect(secondPaused).toHaveBeenLastCalledWith(true);
+  expect(secondRate).toHaveBeenLastCalledWith(2);
+  expect(controller.getSnapshot()).toMatchObject({
+    phase: "playing",
+    paused: true,
+    elapsedSeconds: 16,
+  });
+  controller.cycleRate();
+  expect(secondRate).toHaveBeenLastCalledWith(1);
+  controller.togglePaused();
+  expect(secondPaused).toHaveBeenLastCalledWith(false);
+  controller.stop();
+  await reading;
+  expect(controller.getSnapshot()).toMatchObject({ owner: null, phase: "idle", elapsedSeconds: 0 });
+  expect(synthesize).toHaveBeenCalledTimes(2);
+});
+
+it("applies controls changed during initial loading and clears the player on natural completion", async () => {
+  const audio = Promise.withResolvers<Uint8Array>();
+  const ready = Promise.withResolvers<void>();
+  const finished = Promise.withResolvers<void>();
+  const setPaused = vi.fn();
+  const setRate = vi.fn();
+  const controller = new NarrationController<void>({
+    synthesize: () => audio.promise,
+    play: async (_audio, _signal, options) => {
+      options.onReady({ setPaused, setRate });
+      ready.resolve();
+      await finished.promise;
+    },
+  });
+  const reading = controller.start("reply", "Hello", undefined);
+  controller.togglePaused();
+  controller.cycleRate();
+  audio.resolve(new Uint8Array([1]));
+  await ready.promise;
+  expect(setPaused).toHaveBeenCalledExactlyOnceWith(true);
+  expect(setRate).toHaveBeenCalledExactlyOnceWith(1.5);
+  controller.togglePaused();
+  finished.resolve();
+  await reading;
+  expect(controller.getSnapshot()).toMatchObject({
+    owner: null,
+    phase: "idle",
+    paused: false,
+    rate: 1.5,
   });
 });
 

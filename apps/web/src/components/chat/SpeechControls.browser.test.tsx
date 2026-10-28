@@ -92,6 +92,7 @@ vi.mock("./webVoiceRecorder", () => ({
   },
 }));
 
+import { NarrationPlayer } from "./NarrationPlayer";
 import { ReadAloudButton } from "./ReadAloudButton";
 import { DictationControl } from "./DictationControl";
 import { useWebDictation } from "./useWebDictation";
@@ -149,15 +150,18 @@ it("dictates through the selected Speech host and commits to a chat running else
 it("narrates through the selected Speech host and opens global narration settings on rejection", async () => {
   setup();
   await using screen = await render(
-    <ReadAloudButton
-      environmentId={EnvironmentId.make("agent-host")}
-      owner="reply"
-      text="Hello"
-      streaming={false}
-    />,
+    <>
+      <NarrationPlayer />
+      <ReadAloudButton
+        environmentId={EnvironmentId.make("agent-host")}
+        owner="reply"
+        text="Hello"
+        streaming={false}
+      />
+    </>,
     { router: "/threads/test" },
   );
-  await userEvent.click(screen.getByRole("button", { name: "Read aloud (AI-generated voice)" }));
+  await userEvent.click(screen.getByRole("button", { name: "Read aloud" }));
   await expect
     .element(screen.getByRole("alert"))
     .toMatchTextContent(/ElevenLabs narration: The API key is invalid or expired/);
@@ -187,7 +191,100 @@ it("hides both controls when the chosen Speech host is unconfigured, even if ano
     </>,
   );
   await expect.element(screen.getByRole("button", { name: "Dictate" })).not.toBeInTheDocument();
+  await expect.element(screen.getByRole("button", { name: "Read aloud" })).not.toBeInTheDocument();
+});
+
+it.each(["completion", "close", "environment change"] as const)(
+  "keeps the player when its message unmounts and cleans up on %s",
+  async (ending) => {
+    setup();
+    state.synthesize.mockResolvedValue(AsyncResult.success(new Uint8Array([1, 2, 3])));
+    const audio = document.createElement("audio");
+    await using screen = await render(
+      <>
+        <NarrationPlayer />
+        <ReadAloudButton
+          environmentId={EnvironmentId.make("agent-host")}
+          owner="reply"
+          text="Hello"
+          streaming={false}
+        />
+      </>,
+    );
+    using play = vi.spyOn(audio, "play").mockResolvedValue();
+    using pause = vi.spyOn(audio, "pause").mockImplementation(() => {});
+    using load = vi.spyOn(audio, "load").mockImplementation(() => {});
+    using _audio = vi.spyOn(window, "Audio").mockImplementation(function () {
+      return audio;
+    });
+    using revoke = vi.spyOn(URL, "revokeObjectURL");
+    await expect
+      .element(screen.getByRole("region", { name: "Read aloud player" }))
+      .not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Read aloud", exact: true }));
+    await expect
+      .element(screen.getByRole("button", { name: "Pause narration" }))
+      .toBeInTheDocument();
+    await vi.waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    await screen.rerender(<NarrationPlayer />);
+    await expect
+      .element(screen.getByRole("region", { name: "Read aloud player" }))
+      .toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Pause narration" }));
+    expect(pause).toHaveBeenCalledTimes(1);
+    await expect
+      .element(screen.getByRole("button", { name: "Resume narration" }))
+      .toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Playback speed 1x" }));
+    expect(audio.playbackRate).toBe(1.5);
+    await userEvent.click(screen.getByRole("button", { name: "Playback speed 1.5x" }));
+    expect(audio.playbackRate).toBe(2);
+    await userEvent.click(screen.getByRole("button", { name: "Playback speed 2x" }));
+    expect(audio.playbackRate).toBe(1);
+    await userEvent.click(screen.getByRole("button", { name: "Resume narration" }));
+    expect(play).toHaveBeenCalledTimes(2);
+    audio.currentTime = 65;
+    audio.dispatchEvent(new Event("timeupdate"));
+    await expect.element(screen.getByLabelText("Playback time")).toHaveTextContent("1:05");
+    if (ending === "completion") audio.dispatchEvent(new Event("ended"));
+    else if (ending === "close")
+      await userEvent.click(screen.getByRole("button", { name: "Close narration" }));
+    else await selectSpeechEnvironment(EnvironmentId.make("empty-host"));
+    await expect
+      .element(screen.getByRole("region", { name: "Read aloud player" }))
+      .not.toBeInTheDocument();
+    expect(revoke).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenCalledTimes(1);
+  },
+);
+
+it("closes and cancels narration while audio is still being prepared", async () => {
+  setup();
+  const generated = Promise.withResolvers<ReturnType<typeof AsyncResult.success<Uint8Array>>>();
+  state.synthesize.mockReturnValue(generated.promise);
+  await using screen = await render(
+    <>
+      <NarrationPlayer />
+      <ReadAloudButton
+        environmentId={EnvironmentId.make("agent-host")}
+        owner="reply"
+        text="Hello"
+        streaming={false}
+      />
+    </>,
+  );
+  using createUrl = vi.spyOn(URL, "createObjectURL");
+  await userEvent.click(screen.getByRole("button", { name: "Read aloud", exact: true }));
   await expect
-    .element(screen.getByRole("button", { name: "Read aloud (AI-generated voice)" }))
+    .element(screen.getByRole("region", { name: "Read aloud player" }))
+    .toMatchTextContent(/Preparing audio/);
+  await userEvent.click(screen.getByRole("button", { name: "Close narration" }));
+  await expect
+    .element(screen.getByRole("region", { name: "Read aloud player" }))
     .not.toBeInTheDocument();
+  const request = state.synthesize.mock.calls[0]?.[1];
+  expect(request.input.signal.aborted).toBe(true);
+  generated.resolve(AsyncResult.success(new Uint8Array([1, 2, 3])));
+  await generated.promise;
+  expect(createUrl).not.toHaveBeenCalled();
 });

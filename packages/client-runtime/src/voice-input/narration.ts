@@ -6,12 +6,34 @@ export type NarrationState = {
   readonly phase: "idle" | "loading" | "playing";
   readonly error: string | null;
   readonly errorAction: "speech-settings" | null;
+  readonly paused: boolean;
+  readonly rate: 1 | 1.5 | 2;
+  readonly elapsedSeconds: number;
+};
+
+type NarrationPlayback = {
+  readonly setPaused: (paused: boolean) => void;
+  readonly setRate: (rate: NarrationState["rate"]) => void;
+};
+
+export type NarrationPlaybackOptions = {
+  readonly onReady: (playback: NarrationPlayback) => void;
+  readonly onProgress: (seconds: number) => void;
 };
 
 export class NarrationController<Context> {
-  private state: NarrationState = { owner: null, phase: "idle", error: null, errorAction: null };
+  private state: NarrationState = {
+    owner: null,
+    phase: "idle",
+    error: null,
+    errorAction: null,
+    paused: false,
+    rate: 1,
+    elapsedSeconds: 0,
+  };
   private readonly listeners = new Set<() => void>();
   private active: AbortController | null = null;
+  private playback: NarrationPlayback | null = null;
 
   private readonly dependencies: {
     readonly synthesize: (
@@ -19,7 +41,11 @@ export class NarrationController<Context> {
       context: Context,
       signal: AbortSignal,
     ) => Promise<Uint8Array>;
-    readonly play: (audio: Uint8Array, signal: AbortSignal) => Promise<void>;
+    readonly play: (
+      audio: Uint8Array,
+      signal: AbortSignal,
+      options: NarrationPlaybackOptions,
+    ) => Promise<void>;
   };
 
   constructor(dependencies: NarrationController<Context>["dependencies"]) {
@@ -37,7 +63,29 @@ export class NarrationController<Context> {
   stop(): void {
     this.active?.abort();
     this.active = null;
-    this.publish({ owner: null, phase: "idle", error: null, errorAction: null });
+    this.playback = null;
+    this.publish({
+      ...this.state,
+      owner: null,
+      phase: "idle",
+      error: null,
+      errorAction: null,
+      paused: false,
+      elapsedSeconds: 0,
+    });
+  }
+
+  togglePaused(): void {
+    if (!this.active) return;
+    const paused = !this.state.paused;
+    this.publish({ ...this.state, paused });
+    this.playback?.setPaused(paused);
+  }
+
+  cycleRate(): void {
+    const rate = this.state.rate === 1 ? 1.5 : this.state.rate === 1.5 ? 2 : 1;
+    this.publish({ ...this.state, rate });
+    this.playback?.setRate(rate);
   }
 
   async start(owner: string, markdown: string, context: Context): Promise<void> {
@@ -45,6 +93,7 @@ export class NarrationController<Context> {
     const chunks = narrationChunks(markdown);
     if (chunks.length === 0) {
       this.publish({
+        ...this.state,
         owner,
         phase: "idle",
         error: "This response has no readable text.",
@@ -54,21 +103,41 @@ export class NarrationController<Context> {
     }
     const operation = new AbortController();
     this.active = operation;
+    let completedSeconds = 0;
     try {
       for (const text of chunks) {
-        this.publish({ owner, phase: "loading", error: null, errorAction: null });
+        this.publish({ ...this.state, owner, phase: "loading", error: null, errorAction: null });
         const audio = await this.dependencies.synthesize(text, context, operation.signal);
         if (operation.signal.aborted) return;
-        this.publish({ owner, phase: "playing", error: null, errorAction: null });
-        await this.dependencies.play(audio, operation.signal);
+        let position = 0;
+        await this.dependencies.play(audio, operation.signal, {
+          onReady: (playback) => {
+            if (operation.signal.aborted) return;
+            this.playback = playback;
+            playback.setRate(this.state.rate);
+            this.publish({ ...this.state, phase: "playing" });
+            playback.setPaused(this.state.paused);
+          },
+          onProgress: (seconds) => {
+            if (operation.signal.aborted || !Number.isFinite(seconds) || seconds < 0) return;
+            position = seconds;
+            const elapsedSeconds = Math.floor(completedSeconds + position);
+            if (elapsedSeconds !== this.state.elapsedSeconds)
+              this.publish({ ...this.state, elapsedSeconds });
+          },
+        });
         if (operation.signal.aborted) return;
+        this.playback = null;
+        completedSeconds += position;
       }
       if (this.active === operation) this.stop();
     } catch (error) {
       if (operation.signal.aborted) return;
       operation.abort();
       this.active = null;
+      this.playback = null;
       this.publish({
+        ...this.state,
         owner,
         phase: "idle",
         errorAction: speechErrorRequiresConfiguration(error) ? "speech-settings" : null,
