@@ -1,5 +1,3 @@
-import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
-import { useEnvironmentScope } from "../../state/session";
 import { useAtomValue } from "@effect/atom-react";
 import {
   AudioModule,
@@ -19,12 +17,11 @@ import {
   preferredMicrophoneInput,
   rememberMicrophones,
 } from "../../lib/microphonePriority";
-import { serverEnvironment } from "../../state/server";
-import { speechEnvironment } from "../../state/speech";
+import { speechEnvironment, speechContextAtom } from "../../state/speech";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import {
-  VoiceTranscriptionError,
+  voiceTranscriptionFailure,
   throwIfVoiceTranscriptionAborted,
   voiceInputBlocksSubmission,
 } from "@t3tools/client-runtime/voice-input";
@@ -100,9 +97,10 @@ const voiceInputAtom = Atom.make((get) => {
     recorder,
     getTranscriber: (target) => {
       if (!target) return null;
-      const config = registry.get(serverEnvironment.configValueAtom(target.environmentId))?.settings
-        .speech.dictation;
-      if (!config?.credential) return null;
+      const speech = registry.get(speechContextAtom);
+      const speechEnvironmentId = speech.environmentId;
+      const config = speech.dictation;
+      if (!config?.credential || !speech.canOperate || speechEnvironmentId === null) return null;
       return {
         prepare: async () => ({
           locale: config.language,
@@ -110,16 +108,12 @@ const voiceInputAtom = Atom.make((get) => {
           transcribe: async (uri, { signal }) => {
             throwIfVoiceTranscriptionAborted(signal);
             const result = await speechEnvironment.transcribe.run(registry, {
-              environmentId: target.environmentId,
+              environmentId: speechEnvironmentId,
               input: { audio: await new File(uri).bytes(), format: "m4a", signal },
             });
             if (result._tag === "Failure") {
               const cause = squashAtomCommandFailure(result);
-              throw new VoiceTranscriptionError(
-                "transcription-failed",
-                cause instanceof Error ? cause.message : "Could not transcribe this recording.",
-                { cause },
-              );
+              throw voiceTranscriptionFailure(cause);
             }
             return result.value.text;
           },
@@ -154,6 +148,17 @@ const voiceInputAtom = Atom.make((get) => {
     publishAudioLevels: (levels) => audioLevels.set(levels),
     keepAwake: () => keepScreenAwake(`voice-input:${++keepAwakeSequence}`),
   });
+  let speechContext = registry.get(speechContextAtom);
+  get.subscribe(speechContextAtom, (next) => {
+    if (
+      next.environmentId !== speechContext.environmentId ||
+      next.dictation !== speechContext.dictation ||
+      !next.canOperate
+    ) {
+      session.controller.cancel();
+    }
+    speechContext = next;
+  });
   // iOS reports `inactive` while its permission dialog is open. Only the real
   // background state cancels preparation; recorder status handles calls and
   // route interruptions during capture.
@@ -171,11 +176,10 @@ const voiceInputAtom = Atom.make((get) => {
 export function useGlobalVoiceInput() {
   const { session, audioLevels } = useAtomValue(voiceInputAtom);
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
-  const config = useAtomValue(serverEnvironment.configValueAtom(session.environmentId));
-  const allowed = useEnvironmentScope(session.environmentId, AuthOrchestrationOperateScope);
+  const speech = useAtomValue(speechContextAtom);
   return {
     ...snapshot,
-    isAvailable: Boolean(config?.settings.speech.dictation?.credential && allowed),
+    isAvailable: Boolean(speech.dictation?.credential && speech.canOperate),
     audioLevels,
     isBusy: voiceInputBlocksSubmission(snapshot.state),
     session,

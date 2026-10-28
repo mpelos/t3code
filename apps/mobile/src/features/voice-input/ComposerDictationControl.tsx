@@ -1,3 +1,4 @@
+import { Button } from "../../components/ui/Button";
 import type { VoiceInputPhase, VoiceInputState } from "@t3tools/client-runtime/voice-input";
 import { memo, useState, type ReactNode } from "react";
 import { Linking, Pressable, Text as SystemText, View, type LayoutChangeEvent } from "react-native";
@@ -402,6 +403,7 @@ export function ComposerDictationCancelAction(props: {
 }
 
 export function ComposerDictationPrimaryAction(props: {
+  readonly onOpenSpeechSettings: () => void;
   readonly size?: "regular" | "large";
   readonly state: VoiceInputState;
   readonly presentation: VoiceComposerPresentation;
@@ -433,6 +435,7 @@ export function ComposerDictationPrimaryAction(props: {
 }
 
 export function ComposerDictationStartAction(props: {
+  readonly onOpenSpeechSettings: () => void;
   readonly size?: "regular" | "large";
   readonly state: VoiceInputState;
   readonly isAvailable: boolean;
@@ -441,6 +444,9 @@ export function ComposerDictationStartAction(props: {
   readonly onCancel: () => void;
 }) {
   if (!props.isAvailable) return null;
+  const fixCredentials = props.state.errorAction === "speech-settings";
+  if (fixCredentials)
+    return <Button label="Fix credentials" onPress={props.onOpenSpeechSettings} />;
   const openSettings = props.state.phase === "error" && props.state.errorAction === "settings";
   return (
     <VoiceActionButton

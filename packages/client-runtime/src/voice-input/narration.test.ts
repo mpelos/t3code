@@ -1,3 +1,4 @@
+import { SpeechError } from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
 import { NarrationController } from "./narration.ts";
 
@@ -34,7 +35,12 @@ it.each(["loading", "playing"] as const)(
     playFinished.resolve();
     await first;
     expect(played).toEqual(phase === "loading" ? [2] : [1, 2]);
-    expect(controller.getSnapshot()).toEqual({ owner: null, phase: "idle", error: null });
+    expect(controller.getSnapshot()).toEqual({
+      owner: null,
+      phase: "idle",
+      error: null,
+      errorAction: null,
+    });
   },
 );
 
@@ -53,4 +59,29 @@ it("plays long responses in order and stops before requesting more audio on fail
     phase: "idle",
     error: "Audio device unavailable",
   });
+});
+
+it.each([
+  "invalid-credential",
+  "permission-denied",
+  "rejected",
+  "quota-exceeded",
+  "unavailable",
+] as const)("presents %s with the appropriate recovery action", async (reason) => {
+  const error = new SpeechError({ reason, provider: "elevenlabs", role: "narration" });
+  const play = vi.fn();
+  const controller = new NarrationController<void>({
+    synthesize: async () => {
+      throw error;
+    },
+    play,
+  });
+  await controller.start("reply", "Hello", undefined);
+  expect(controller.getSnapshot()).toMatchObject({
+    owner: "reply",
+    phase: "idle",
+    error: error.message,
+    errorAction: reason === "quota-exceeded" || reason === "unavailable" ? null : "speech-settings",
+  });
+  expect(play).not.toHaveBeenCalled();
 });

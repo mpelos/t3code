@@ -44,6 +44,7 @@ export function DictationControl({
   if (!voice.available) return null;
   const recording = voice.state.phase === "recording";
   const active = voice.isBusy;
+  const fixCredentials = voice.state.errorAction === "speech-settings";
   const label = active ? "Cancel dictation" : "Dictate";
   return (
     <div className="flex items-center gap-1">
@@ -52,24 +53,31 @@ export function DictationControl({
           {voice.state.error}
         </span>
       ) : null}
+      {fixCredentials ? (
+        <Button type="button" variant="ghost" size="sm" onClick={voice.openSettings}>
+          Fix credentials
+        </Button>
+      ) : null}
       {recording ? <RecordingWaveform recorder={voice.recorder} /> : null}
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              type="button"
-              variant="ghost-muted"
-              size="icon-sm"
-              aria-label={label}
-              disabled={!active && disabled}
-              onClick={active ? voice.cancel : voice.start}
-            />
-          }
-        >
-          {active ? <XIcon /> : <MicIcon />}
-        </TooltipTrigger>
-        <TooltipPopup>{label}</TooltipPopup>
-      </Tooltip>
+      {!fixCredentials ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                type="button"
+                variant="ghost-muted"
+                size="icon-sm"
+                aria-label={label}
+                disabled={!active && disabled}
+                onClick={active ? voice.cancel : voice.start}
+              />
+            }
+          >
+            {active ? <XIcon /> : <MicIcon />}
+          </TooltipTrigger>
+          <TooltipPopup>{label}</TooltipPopup>
+        </Tooltip>
+      ) : null}
       {active ? (
         <Button
           type="button"

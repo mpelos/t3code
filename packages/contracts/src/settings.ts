@@ -11,6 +11,7 @@ import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
+  EnvironmentId,
   ForwardCompatibleNullable,
   ForwardCompatibleOptional,
   OmittedWhenNull,
@@ -348,6 +349,9 @@ export type ModelPreferences = {
 };
 
 export const ClientSettingsSchema = Schema.Struct({
+  speechEnvironmentId: Schema.NullOr(EnvironmentId).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
   ),
@@ -1698,6 +1702,7 @@ export function requiredScopesForProjectMutation(
 }
 
 export const ClientSettingsPatch = Schema.Struct({
+  speechEnvironmentId: Schema.optionalKey(Schema.NullOr(EnvironmentId)),
   notificationMode: Schema.optionalKey(NotificationMode),
   inAppNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
   diffColorScheme: Schema.optionalKey(DiffColorScheme),

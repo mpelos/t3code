@@ -1,3 +1,5 @@
+import { useNavigation } from "@react-navigation/native";
+import { Button } from "../../components/ui/Button";
 import { uuidv4 } from "../../lib/uuid";
 import { useAtomValue } from "@effect/atom-react";
 import { useEffect, useSyncExternalStore } from "react";
@@ -5,12 +7,10 @@ import { AppState, View } from "react-native";
 import { createAudioPlayer } from "expo-audio";
 import { File, Paths } from "expo-file-system";
 import { Atom } from "effect/reactivity";
-import { AuthOrchestrationOperateScope, type EnvironmentId } from "@t3tools/contracts";
+import { type EnvironmentId } from "@t3tools/contracts";
 import { NarrationController } from "@t3tools/client-runtime/voice-input";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { serverEnvironment } from "../../state/server";
-import { speechEnvironment } from "../../state/speech";
-import { useEnvironmentScope } from "../../state/session";
+import { speechEnvironment, speechContextAtom } from "../../state/speech";
 import {
   acquireAudioSession,
   activateAudioSession,
@@ -97,12 +97,14 @@ export function ReadAloudButton({
   readonly text: string;
   readonly streaming: boolean;
 }) {
+  const navigation = useNavigation();
   const controller = useAtomValue(narrationAtom);
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
-  const configured = useAtomValue(serverEnvironment.configValueAtom(environmentId))?.settings.speech
-    .narration?.credential;
-  const allowed = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
-  const key = `${environmentId}:${owner}`;
+  const speech = useAtomValue(speechContextAtom);
+  const speechEnvironmentId = speech.environmentId;
+  const configured = speech.narration?.credential;
+  const allowed = speech.canOperate;
+  const key = `${speechEnvironmentId}:${environmentId}:${owner}`;
   const active = state.owner === key && state.phase !== "idle";
   const error = state.owner === key ? state.error : null;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- stops audio when its response unmounts or the configured narration provider disconnects
@@ -112,7 +114,7 @@ export function ReadAloudButton({
       if (controller.getSnapshot().owner === key) controller.stop();
     };
   }, [controller, key, configured]);
-  if (!configured) return null;
+  if (!configured || speechEnvironmentId === null) return null;
   return (
     <View className="shrink flex-row items-center gap-1">
       <IconButton
@@ -120,9 +122,18 @@ export function ReadAloudButton({
         accessibilityLabel={active ? "Stop reading aloud" : "Read aloud (AI-generated voice)"}
         disabled={!active && (!allowed || streaming || !text.trim())}
         onPress={() =>
-          active ? controller.stop() : void controller.start(key, text, environmentId)
+          active ? controller.stop() : void controller.start(key, text, speechEnvironmentId)
         }
       />
+      {error && state.errorAction === "speech-settings" ? (
+        <Button
+          label="Fix credentials"
+          onPress={() => {
+            controller.stop();
+            navigation.navigate("SettingsSpeech", { role: "narration" });
+          }}
+        />
+      ) : null}
       {error ? (
         <Text accessibilityRole="alert" className="shrink text-xs text-danger-foreground">
           {error}

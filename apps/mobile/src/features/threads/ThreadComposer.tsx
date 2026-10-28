@@ -938,6 +938,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
               >
                 {modelControl}
                 <ComposerDictationStartAction
+                  onOpenSpeechSettings={voiceInput.openSpeechSettings}
                   size={usesLargeControls ? "large" : "regular"}
                   state={voiceInput.state}
                   isAvailable={voiceInput.isAvailable}
@@ -1139,6 +1140,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
                 />
                 <View className="shrink-0 flex-row items-center">
                   <ComposerDictationPrimaryAction
+                    onOpenSpeechSettings={voiceInput.openSpeechSettings}
                     size={usesLargeControls ? "large" : "regular"}
                     state={voiceInput.state}
                     presentation={voicePresentation}

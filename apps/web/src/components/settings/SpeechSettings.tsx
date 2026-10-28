@@ -1,9 +1,6 @@
+import { useAtomValue } from "@effect/atom-react";
 import { useState } from "react";
-import {
-  AuthSettingsWriteScope,
-  type EnvironmentId,
-  type SpeechSettings as SpeechConfig,
-} from "@t3tools/contracts";
+import { type EnvironmentId, type SpeechSettings as SpeechConfig } from "@t3tools/contracts";
 import {
   SPEECH_PROVIDERS,
   speechSettingsDraft,
@@ -14,27 +11,20 @@ import {
 } from "@t3tools/client-runtime/voice-input";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { useAtomCommand } from "~/state/use-atom-command";
-import { useEnvironmentScope } from "~/state/session";
-import { serverEnvironment } from "~/state/server";
+import { speechEnvironment, speechContextAtom, selectSpeechEnvironment } from "~/state/speech";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SecretInput } from "./SecretInput";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
-import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
+import { useEnvironments } from "~/state/environments";
 import { settingsScopeEnvironmentLabel } from "./settingsScopeAxis";
 import { searchableSetting } from "./settingsSearch";
 
 export function SpeechSettings() {
   const { environments } = useEnvironments();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<EnvironmentId | null>(null);
-  const environment =
-    selectedEnvironmentId !== null
-      ? environments.find((candidate) => candidate.environmentId === selectedEnvironmentId)
-      : (environments.find((candidate) => candidate.environmentId === primaryEnvironmentId) ??
-        environments.find((candidate) => candidate.connection.phase === "connected") ??
-        environments[0]);
+  const { environmentId } = useAtomValue(speechContextAtom);
+  const environment = environments.find((candidate) => candidate.environmentId === environmentId);
   const options = environments.map((candidate) => ({
     value: candidate.environmentId,
     label: settingsScopeEnvironmentLabel(candidate, environments),
@@ -43,14 +33,14 @@ export function SpeechSettings() {
   return (
     <SettingsSection {...searchableSetting("speech")}>
       <SettingsRow
-        title="Environment"
-        description="Speech credentials are stored on this environment and used by its chats."
+        title="Speech environment"
+        description="Use this environment for dictation and read aloud in every chat on this device. Credentials stay on this environment."
         control={
           <Select
             items={options}
             value={environment?.environmentId ?? null}
             onValueChange={(next) => {
-              if (next !== null) setSelectedEnvironmentId(next);
+              if (next !== null) void selectSpeechEnvironment(next);
             }}
             disabled={options.length === 0}
           >
@@ -134,31 +124,46 @@ function SpeechForm({
   const current = config[role];
   const [draft, setDraft] = useState(() => speechSettingsDraft(current));
   const [pending, setPending] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const allowed = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
-  const update = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
+  const allowed = useAtomValue(speechEnvironment.configure.permissionAtom(environmentId));
+  const update = useAtomCommand(speechEnvironment.configure, { reportFailure: false });
   const label = role === "dictation" ? "Dictation" : "Read aloud";
   const disabled = !allowed || pending;
+  function changeDraft(next: typeof draft) {
+    setSaved(false);
+    setError(null);
+    setDraft(next);
+  }
   async function save() {
     setError(null);
+    setSaved(false);
     setPending(true);
     const built = await settlePromise(async () =>
       role === "dictation"
-        ? { dictation: dictationSettingsFromDraft(draft, config.dictation) }
-        : { narration: narrationSettingsFromDraft(draft, config.narration) },
+        ? {
+            role: "dictation" as const,
+            config: dictationSettingsFromDraft(draft, config.dictation),
+          }
+        : {
+            role: "narration" as const,
+            config: narrationSettingsFromDraft(draft, config.narration),
+          },
     );
     const result =
-      built._tag === "Failure"
-        ? built
-        : await update({ environmentId, input: { patch: { speech: built.value } } });
+      built._tag === "Failure" ? built : await update({ environmentId, input: built.value });
     setPending(false);
     if (result._tag === "Failure") {
       const cause = squashAtomCommandFailure(result);
       setError(cause instanceof Error ? cause.message : "Could not save speech settings.");
-    } else setDraft({ ...draft, credential: "" });
+    } else {
+      setDraft({ ...draft, credential: "" });
+      setSaved(true);
+    }
   }
   return (
     <SettingsRow
+      id={`speech-${role}`}
       title={label}
       description={
         role === "dictation"
@@ -173,7 +178,7 @@ function SpeechForm({
           )}
           value={draft.provider}
           onValueChange={(provider: SpeechProvider | null) => {
-            if (provider) setDraft(selectSpeechProvider(draft, provider));
+            if (provider) changeDraft(selectSpeechProvider(draft, provider));
           }}
           disabled={disabled}
         >
@@ -199,7 +204,7 @@ function SpeechForm({
               value={draft.credential}
               placeholder={draft.provider === "google" ? "Service account JSON" : "API key"}
               disabled={disabled}
-              onChange={(event) => setDraft({ ...draft, credential: event.target.value })}
+              onChange={(event) => changeDraft({ ...draft, credential: event.target.value })}
             />
             {draft.provider === "google" ? (
               <p className="text-xs text-muted-foreground">
@@ -214,7 +219,7 @@ function SpeechForm({
                 placeholder="Language code (pt-BR)"
                 value={draft.language}
                 disabled={disabled}
-                onChange={(event) => setDraft({ ...draft, language: event.target.value })}
+                onChange={(event) => changeDraft({ ...draft, language: event.target.value })}
               />
             ) : null}
             {role === "narration" ? (
@@ -223,7 +228,7 @@ function SpeechForm({
                 placeholder={draft.provider === "elevenlabs" ? "ElevenLabs voice ID" : "Voice name"}
                 value={draft.voice}
                 disabled={disabled}
-                onChange={(event) => setDraft({ ...draft, voice: event.target.value })}
+                onChange={(event) => changeDraft({ ...draft, voice: event.target.value })}
               />
             ) : null}
             {role === "dictation" && draft.provider === "google" ? (
@@ -233,6 +238,22 @@ function SpeechForm({
             ) : null}
           </>
         ) : null}
+        {draft.provider !== "disabled" ? (
+          <p className="text-xs text-muted-foreground">
+            Saving tests your credentials with a short request to the selected provider and may use
+            credits.
+          </p>
+        ) : null}
+        {!allowed ? (
+          <p className="text-sm text-muted-foreground">
+            You need settings access to update this environment's speech configuration.
+          </p>
+        ) : null}
+        {saved ? (
+          <p role="status" className="text-sm text-muted-foreground">
+            {draft.provider === "disabled" ? "Disabled." : "Credentials verified and saved."}
+          </p>
+        ) : null}
         {error ? (
           <p role="alert" className="text-sm text-destructive-foreground">
             {error}
@@ -240,7 +261,9 @@ function SpeechForm({
         ) : null}
         <div>
           <Button size="sm" variant="outline" disabled={disabled} onClick={() => void save()}>
-            {pending ? "Saving…" : `Save ${label.toLowerCase()}`}
+            {pending
+              ? "Saving…"
+              : `${draft.provider === "disabled" ? "Save" : "Validate and save"} ${label.toLowerCase()}`}
           </Button>
         </div>
       </div>

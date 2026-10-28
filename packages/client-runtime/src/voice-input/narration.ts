@@ -1,13 +1,15 @@
+import { speechErrorRequiresConfiguration } from "./settings.ts";
 import { narrationChunks } from "@t3tools/shared/narration";
 
 export type NarrationState = {
   readonly owner: string | null;
   readonly phase: "idle" | "loading" | "playing";
   readonly error: string | null;
+  readonly errorAction: "speech-settings" | null;
 };
 
 export class NarrationController<Context> {
-  private state: NarrationState = { owner: null, phase: "idle", error: null };
+  private state: NarrationState = { owner: null, phase: "idle", error: null, errorAction: null };
   private readonly listeners = new Set<() => void>();
   private active: AbortController | null = null;
 
@@ -35,24 +37,29 @@ export class NarrationController<Context> {
   stop(): void {
     this.active?.abort();
     this.active = null;
-    this.publish({ owner: null, phase: "idle", error: null });
+    this.publish({ owner: null, phase: "idle", error: null, errorAction: null });
   }
 
   async start(owner: string, markdown: string, context: Context): Promise<void> {
     this.stop();
     const chunks = narrationChunks(markdown);
     if (chunks.length === 0) {
-      this.publish({ owner, phase: "idle", error: "This response has no readable text." });
+      this.publish({
+        owner,
+        phase: "idle",
+        error: "This response has no readable text.",
+        errorAction: null,
+      });
       return;
     }
     const operation = new AbortController();
     this.active = operation;
     try {
       for (const text of chunks) {
-        this.publish({ owner, phase: "loading", error: null });
+        this.publish({ owner, phase: "loading", error: null, errorAction: null });
         const audio = await this.dependencies.synthesize(text, context, operation.signal);
         if (operation.signal.aborted) return;
-        this.publish({ owner, phase: "playing", error: null });
+        this.publish({ owner, phase: "playing", error: null, errorAction: null });
         await this.dependencies.play(audio, operation.signal);
         if (operation.signal.aborted) return;
       }
@@ -64,6 +71,7 @@ export class NarrationController<Context> {
       this.publish({
         owner,
         phase: "idle",
+        errorAction: speechErrorRequiresConfiguration(error) ? "speech-settings" : null,
         error: error instanceof Error ? error.message : "Could not read this response aloud.",
       });
     }

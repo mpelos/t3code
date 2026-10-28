@@ -1,3 +1,4 @@
+import { SpeechConfigureInput, SpeechError } from "./speech.ts";
 import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
@@ -496,6 +497,7 @@ export const WS_METHODS = {
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverUpdateSettings: "server.updateSettings",
+  speechConfigure: "speech.configure",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
@@ -791,6 +793,11 @@ const WsPeerLinksUnlinkRpc = Rpc.make(WS_METHODS.peerLinksUnlink, {
 const WsPeerLinksAnswerRequestRpc = Rpc.make(WS_METHODS.peerLinksAnswerRequest, {
   payload: PeerLinkRequestAnswerInput,
   error: Schema.Union([PeerLinkRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsSpeechConfigureRpc = Rpc.make(WS_METHODS.speechConfigure, {
+  payload: SpeechConfigureInput,
+  error: Schema.Union([SpeechError, ServerSettingsError, EnvironmentAuthorizationError]),
 });
 
 const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -1942,6 +1949,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetStorageCleanupReportRpc,
   WsServerGetDatabaseStorageRpc,
   WsServerUpdateSettingsRpc,
+  WsSpeechConfigureRpc,
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,

@@ -46,6 +46,7 @@ export function ScheduledTaskPromptField(props: {
         {showsIdleTrigger ? (
           <View className="absolute right-0 bottom-0 rounded-full bg-card">
             <ComposerDictationStartAction
+              onOpenSpeechSettings={voice.openSpeechSettings}
               state={voice.state}
               isAvailable={voice.isAvailable}
               disabled={props.disabled}
@@ -67,6 +68,7 @@ export function ScheduledTaskPromptField(props: {
               onDismissError={voice.cancel}
             />
             <ComposerDictationPrimaryAction
+              onOpenSpeechSettings={voice.openSpeechSettings}
               state={voice.state}
               presentation={presentation}
               isAvailable={voice.isAvailable}

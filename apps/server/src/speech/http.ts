@@ -22,7 +22,7 @@ const speechResponse = <A, R>(
 ) =>
   effect.pipe(
     Effect.catchTags({
-      SpeechRequestError: (error) => Effect.fail(new SpeechError({ reason: error.reason })),
+      SpeechRequestError: (error) => Effect.fail(error.toClientError()),
       ServerSettingsError: () => failEnvironmentInternal("internal_error"),
     }),
     Effect.tap(() =>

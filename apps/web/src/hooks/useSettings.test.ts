@@ -1,4 +1,4 @@
-import { DEFAULT_SERVER_SETTINGS, ProviderInstanceId } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -181,9 +181,16 @@ describe("persistClientSettingsPatch", () => {
       });
     });
 
-    const firstSettings = { ...DEFAULT_CLIENT_SETTINGS, snapShotFlash: false };
+    const firstSettings = {
+      ...DEFAULT_CLIENT_SETTINGS,
+      speechEnvironmentId: EnvironmentId.make("speech-host"),
+      snapShotFlash: false,
+    };
     const secondSettings = { ...firstSettings, snapShotPlaySound: false };
-    const first = persistClientSettingsPatch({ snapShotFlash: false });
+    const first = persistClientSettingsPatch({
+      speechEnvironmentId: EnvironmentId.make("speech-host"),
+      snapShotFlash: false,
+    });
     await firstStarted;
     const second = persistClientSettingsPatch({ snapShotPlaySound: false });
 

@@ -1,4 +1,5 @@
-import type { DictationSettings, NarrationSettings } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+import { SpeechError, type DictationSettings, type NarrationSettings } from "@t3tools/contracts";
 
 export const SPEECH_PROVIDERS = [
   { value: "disabled", label: "Disabled" },
@@ -79,4 +80,16 @@ export function narrationSettingsFromDraft(
     };
   }
   return { provider: draft.provider, credential, voice: draft.voice.trim() };
+}
+
+const isSpeechError = Schema.is(SpeechError);
+
+export function speechErrorRequiresConfiguration(error: unknown): boolean {
+  return (
+    isSpeechError(error) &&
+    (error.reason === "invalid-credential" ||
+      error.reason === "permission-denied" ||
+      error.reason === "not-configured" ||
+      error.reason === "rejected")
+  );
 }

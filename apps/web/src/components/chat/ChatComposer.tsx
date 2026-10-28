@@ -1030,7 +1030,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
   const voice = useWebDictation({
-    environmentId,
     ownerKey: composerDraftTargetKey,
     readDraft: () => ({
       ownerKey: composerDraftTargetKey,

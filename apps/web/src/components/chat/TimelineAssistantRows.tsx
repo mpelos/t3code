@@ -165,7 +165,7 @@ function AssistantMessageMeta({
         "flex items-center gap-2 text-xs tabular-nums transition-opacity duration-200",
         alwaysVisible
           ? "opacity-100"
-          : "opacity-0 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover/assistant:opacity-100",
+          : "opacity-0 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover/assistant:opacity-100 has-[[data-speech-active=true]]:opacity-100",
         className,
       )}
     >

@@ -1,3 +1,5 @@
+import { SpeechError } from "@t3tools/contracts";
+import { voiceTranscriptionFailure } from "./transcription.ts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -124,7 +126,7 @@ describe("VoiceInputController", () => {
     expect(denied.recorder.record).not.toHaveBeenCalled();
   });
 
-  it.each(["permission", "transcription"] as const)(
+  it.each(["permission", "transcription", "credentials"] as const)(
     "clears %s errors when switching to another draft",
     async (failure) => {
       const harness = createHarness(
@@ -134,7 +136,15 @@ describe("VoiceInputController", () => {
               getTranscriber: () => ({
                 prepare: async () =>
                   preparedTranscription(async () => {
-                    throw new Error("Transcription failed");
+                    throw failure === "credentials"
+                      ? voiceTranscriptionFailure(
+                          new SpeechError({
+                            reason: "invalid-credential",
+                            provider: "openai",
+                            role: "dictation",
+                          }),
+                        )
+                      : new Error("Transcription failed");
                   }),
               }),
             },
@@ -144,7 +154,12 @@ describe("VoiceInputController", () => {
       expect(harness.controller.currentState).toMatchObject({
         phase: "error",
         error: expect.any(String),
-        errorAction: failure === "permission" ? "settings" : "retry",
+        errorAction:
+          failure === "permission"
+            ? "settings"
+            : failure === "credentials"
+              ? "speech-settings"
+              : "retry",
       });
 
       harness.setDraft(draft({ ownerKey: "environment:other-thread" }));

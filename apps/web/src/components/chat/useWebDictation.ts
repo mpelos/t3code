@@ -1,9 +1,9 @@
+import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { useAtomValue } from "@effect/atom-react";
-import { AuthOrchestrationOperateScope, type EnvironmentId } from "@t3tools/contracts";
 import {
   VoiceInputController,
-  VoiceTranscriptionError,
+  voiceTranscriptionFailure,
   throwIfVoiceTranscriptionAborted,
   voiceInputBlocksSubmission,
   type VoiceDraftSnapshot,
@@ -11,14 +11,11 @@ import {
 } from "@t3tools/client-runtime/voice-input";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { useStableCallback } from "~/hooks/useStableCallback";
-import { serverEnvironment } from "~/state/server";
-import { speechEnvironment } from "~/state/speech";
+import { speechEnvironment, speechContextAtom } from "~/state/speech";
 import { useAtomCommand } from "~/state/use-atom-command";
-import { useEnvironmentScope } from "~/state/session";
 import { WebVoiceRecorder } from "./webVoiceRecorder";
 
 export function useWebDictation(input: {
-  readonly environmentId: EnvironmentId;
   readonly ownerKey: string;
   readonly readDraft: () => VoiceDraftSnapshot;
   readonly commitDraft: (
@@ -26,9 +23,11 @@ export function useWebDictation(input: {
     selection: { readonly start: number; readonly end: number },
   ) => void;
 }) {
-  const config = useAtomValue(serverEnvironment.configValueAtom(input.environmentId))?.settings
-    .speech.dictation;
-  const allowed = useEnvironmentScope(input.environmentId, AuthOrchestrationOperateScope);
+  const navigate = useNavigate();
+  const speech = useAtomValue(speechContextAtom);
+  const speechEnvironmentId = speech.environmentId;
+  const config = speech.dictation;
+  const allowed = speech.canOperate;
   const transcribe = useAtomCommand(speechEnvironment.transcribe, { reportFailure: false });
   const [state, setState] = useState<VoiceInputState>({
     phase: "idle",
@@ -38,7 +37,7 @@ export function useWebDictation(input: {
   const readDraft = useStableCallback(input.readDraft);
   const commitDraft = useStableCallback(input.commitDraft);
   const getTranscriber = useStableCallback((read: WebVoiceRecorder["read"]) =>
-    !config?.credential || !allowed
+    !config?.credential || !allowed || speechEnvironmentId === null
       ? null
       : {
           prepare: async () => ({
@@ -49,7 +48,7 @@ export function useWebDictation(input: {
               const recording = read(uri);
               if (!recording) throw new Error("The recording is no longer available.");
               const result = await transcribe({
-                environmentId: input.environmentId,
+                environmentId: speechEnvironmentId,
                 input: {
                   audio: new Uint8Array(await recording.blob.arrayBuffer()),
                   format: recording.format,
@@ -58,11 +57,7 @@ export function useWebDictation(input: {
               });
               if (result._tag === "Failure") {
                 const cause = squashAtomCommandFailure(result);
-                throw new VoiceTranscriptionError(
-                  "transcription-failed",
-                  cause instanceof Error ? cause.message : "Could not transcribe this recording.",
-                  { cause },
-                );
+                throw voiceTranscriptionFailure(cause);
               }
               return result.value.text;
             },
@@ -88,12 +83,25 @@ export function useWebDictation(input: {
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- owns microphone and network cleanup when the draft, environment, or configured provider changes
   useEffect(() => {
-    if (!config?.credential || !allowed || readDraft().ownerKey !== input.ownerKey)
+    if (
+      speechEnvironmentId === null ||
+      !config?.credential ||
+      !allowed ||
+      readDraft().ownerKey !== input.ownerKey
+    )
       controller.cancel();
     return () => controller.dispose();
-  }, [controller, input.ownerKey, config, allowed, readDraft]);
+  }, [controller, input.ownerKey, speechEnvironmentId, config, allowed, readDraft]);
   return {
     state,
+    openSettings: () => {
+      controller.cancel();
+      void navigate({
+        to: "/settings/general",
+        search: {},
+        hash: "speech-dictation",
+      });
+    },
     recorder,
     isBusy: voiceInputBlocksSubmission(state),
     available: Boolean(

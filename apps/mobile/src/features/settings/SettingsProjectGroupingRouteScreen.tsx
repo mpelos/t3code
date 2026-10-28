@@ -1,3 +1,4 @@
+import { SpeechSettingsSection } from "./SpeechSettingsSection";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import type { SidebarProjectGroupingMode } from "@t3tools/contracts";
@@ -69,6 +70,7 @@ export function SettingsProjectGroupingRouteScreen() {
         </SettingsSection>
         <WorkingSectionSettings />
         <NewThreadSettingsSection />
+        <SpeechSettingsSection />
       </ScrollView>
     </SettingsScreen>
   );

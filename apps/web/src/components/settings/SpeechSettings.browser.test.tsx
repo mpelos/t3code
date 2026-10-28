@@ -1,8 +1,10 @@
+import * as Cause from "effect/Cause";
 import {
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_VERSION,
   ServerConfig,
-  type ServerSettingsPatch,
+  SpeechError,
+  type SpeechConfigureInput,
 } from "@t3tools/contracts";
 import { PrimaryConnectionTarget } from "@t3tools/client-runtime/connection";
 import * as Option from "effect/Option";
@@ -18,15 +20,20 @@ const state = vi.hoisted(
   (): {
     environments: EnvironmentPresentation[];
     primaryId: EnvironmentId | null;
+    selectedId: EnvironmentId | null;
+    listeners: Set<() => void>;
     update: ReturnType<
       typeof vi.fn<
-        (request: {
-          environmentId: EnvironmentId;
-          input: { patch: ServerSettingsPatch };
-        }) => Promise<unknown>
+        (request: { environmentId: EnvironmentId; input: SpeechConfigureInput }) => Promise<unknown>
       >
     >;
-  } => ({ environments: [], primaryId: null, update: vi.fn() }),
+  } => ({
+    environments: [],
+    primaryId: null,
+    selectedId: null,
+    listeners: new Set(),
+    update: vi.fn(),
+  }),
 );
 
 vi.mock(import("../../state/environments"), async (original) => ({
@@ -47,6 +54,23 @@ vi.mock(import("../../state/session"), async (original) => ({
   useEnvironmentsWithScope: (environments: readonly { environmentId: EnvironmentId }[]) =>
     new Set(environments.map((environment) => environment.environmentId)),
 }));
+vi.mock("../../state/speech", async () => {
+  const { Atom } = await import("effect/reactivity");
+  const context = Atom.make((get) => {
+    const publish = () => get.setSelf({ environmentId: state.selectedId });
+    state.listeners.add(publish);
+    get.addFinalizer(() => state.listeners.delete(publish));
+    return { environmentId: state.selectedId };
+  });
+  return {
+    speechContextAtom: context,
+    selectSpeechEnvironment: async (environmentId: EnvironmentId) => {
+      state.selectedId = environmentId;
+      for (const listener of state.listeners) listener();
+    },
+    speechEnvironment: { configure: { permissionAtom: () => Atom.make(true) } },
+  };
+});
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.update }));
 vi.mock(import("./useSettingsProjectGroups"), () => ({ useSettingsProjectGroups: () => [] }));
 
@@ -101,17 +125,23 @@ function environment(id: string): EnvironmentPresentation {
   };
 }
 
-it.each([{}, { machine: "removed" }])(
-  "configures the selected environment independently of General's hidden scope %j",
-  async (search) => {
+it.each([
+  { search: {}, primary: "Server", hash: "" },
+  { search: { machine: "removed" }, primary: "Server", hash: "" },
+  { search: { machine: "Laptop" }, primary: "Laptop", hash: "speech-dictation" },
+])(
+  "uses the app-selected Speech host independently of chat and Settings scope %j",
+  async ({ search, primary, hash }) => {
     state.environments = [environment("Laptop"), environment("Server")];
-    state.primaryId = EnvironmentId.make("Server");
+    state.primaryId = EnvironmentId.make(primary);
+    state.selectedId = EnvironmentId.make("Server");
+    for (const listener of state.listeners) listener();
     state.update.mockReset().mockResolvedValue(AsyncResult.success(undefined));
     await using screen = await render(
       <SettingsScopeProvider search={search} onChange={() => {}}>
         <SpeechSettings />
       </SettingsScopeProvider>,
-      { router: "/settings/general" },
+      { router: `/settings/general${hash ? `#${hash}` : ""}` },
     );
 
     await expect
@@ -130,15 +160,30 @@ it.each([{}, { machine: "removed" }])(
     await userEvent.click(page.getByRole("option", { name: "OpenAI Whisper" }));
     await expect.element(screen.getByLabelText("Dictation credentials")).toHaveValue("");
     await userEvent.type(screen.getByLabelText("Dictation credentials"), "laptop-key");
-    await userEvent.click(screen.getByRole("button", { name: "Save dictation" }));
-    expect(state.update).toHaveBeenCalledExactlyOnceWith({
+    state.update.mockResolvedValueOnce(
+      AsyncResult.failure(
+        Cause.fail(
+          new SpeechError({ reason: "invalid-credential", provider: "openai", role: "dictation" }),
+        ),
+      ),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Validate and save dictation" }));
+    await expect
+      .element(screen.getByRole("alert"))
+      .toMatchTextContent(/OpenAI dictation: The API key is invalid or expired/);
+    await expect.element(screen.getByLabelText("Dictation credentials")).toHaveValue("laptop-key");
+    await userEvent.click(screen.getByRole("button", { name: "Validate and save dictation" }));
+    await expect
+      .element(screen.getByRole("status"))
+      .toHaveTextContent("Credentials verified and saved.");
+    await expect.element(screen.getByLabelText("Dictation credentials")).toHaveValue("");
+    expect(state.selectedId).toBe(EnvironmentId.make("Laptop"));
+    expect(state.update).toHaveBeenCalledTimes(2);
+    expect(state.update).toHaveBeenLastCalledWith({
       environmentId: EnvironmentId.make("Laptop"),
       input: {
-        patch: {
-          speech: {
-            dictation: { provider: "openai", credential: "laptop-key", language: "en-US" },
-          },
-        },
+        role: "dictation",
+        config: { provider: "openai", credential: "laptop-key", language: "en-US" },
       },
     });
   },

@@ -697,6 +697,7 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
 
 const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provideMerge(layerUsage),
+  Layer.provideMerge(Speech.layer),
   Layer.provideMerge(layerBackground),
   Layer.provideMerge(layerResourceDiagnostics),
   Layer.provideMerge(TraceDiagnostics.layer),
@@ -723,7 +724,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(AuthHttp.layer),
       Layer.provide(McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer))),
       Layer.provide(CloudHttp.layer),
-      Layer.provide(SpeechHttp.layer.pipe(Layer.provide(Speech.layer))),
+      Layer.provide(SpeechHttp.layer),
       Layer.provide(OrchestrationHttp.layer),
       Layer.provide(PullRequestHttp.layer),
       Layer.provide(ProjectHttp.layer),

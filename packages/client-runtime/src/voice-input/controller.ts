@@ -13,7 +13,7 @@ export type VoiceInputPhase = "idle" | "preparing" | "recording" | "transcribing
 export type VoiceInputState = {
   readonly phase: VoiceInputPhase;
   readonly error: string | null;
-  readonly errorAction: "retry" | "settings" | null;
+  readonly errorAction: "retry" | "settings" | "speech-settings" | null;
 };
 
 export function voiceInputBlocksSubmission(state: VoiceInputState): boolean {
@@ -397,7 +397,12 @@ export class VoiceInputController {
         );
       } catch (error) {
         if (this.isCurrent(operationToken)) {
-          this.setError(transcriptionErrorMessage(error), "retry");
+          this.setError(
+            transcriptionErrorMessage(error),
+            error instanceof VoiceTranscriptionError && error.code === "configuration-required"
+              ? "speech-settings"
+              : "retry",
+          );
         }
         return;
       }

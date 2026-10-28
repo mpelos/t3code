@@ -1,3 +1,4 @@
+import { SpeechSettingsRouteScreen } from "./features/settings/SpeechSettingsSection";
 import { isDraftThreadRoute } from "./features/threads/thread-route-state";
 import { ComponentCatalogScreen } from "./features/development/ComponentCatalogScreen";
 import { PullRequestGuideStopScreen } from "./features/pull-requests/guide/PullRequestGuideScreen";
@@ -250,6 +251,11 @@ const SETTINGS_SCREENS = {
       ...SETTINGS_PAGE_OPTIONS,
       title: "Environments",
     },
+  }),
+  SettingsSpeech: createNativeStackScreen({
+    screen: SpeechSettingsRouteScreen,
+    linking: "settings/speech",
+    options: { ...SETTINGS_PAGE_OPTIONS, title: "Speech" },
   }),
   SettingsEnvironmentDetail: createNativeStackScreen({
     screen: SettingsEnvironmentDetailRouteScreen,

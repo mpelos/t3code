@@ -77,6 +77,7 @@ const WorkspaceSelections = Schema.Struct({
 });
 export type WorkspaceSelections = typeof WorkspaceSelections.Type;
 
+const isEnvironmentId = Schema.is(EnvironmentId);
 const isThreadListFilters = Schema.is(ThreadListFilters);
 const isWorkspaceSelections = Schema.is(WorkspaceSelections);
 const isPullRequestListPreferences = Schema.is(PullRequestListPreferences);
@@ -111,6 +112,7 @@ export interface Preferences {
   /** Hardware Return behavior is iOS-only. */
   readonly composerEnterBehavior?: ComposerEnterBehavior;
   readonly followUpBehavior?: FollowUpBehavior;
+  readonly speechEnvironmentId?: EnvironmentId | null;
   readonly microphones?: ReadonlyArray<MicrophoneEntry>;
   readonly projectGroupingEnabled?: boolean;
   readonly projectGroupingMode?: SidebarProjectGroupingMode;
@@ -191,6 +193,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     dismissedDatabaseStorageNotices?: readonly string[];
     composerEnterBehavior?: ComposerEnterBehavior;
     followUpBehavior?: FollowUpBehavior;
+    speechEnvironmentId?: EnvironmentId | null;
     microphones?: ReadonlyArray<MicrophoneEntry>;
     projectGroupingEnabled?: boolean;
     projectGroupingMode?: SidebarProjectGroupingMode;
@@ -299,6 +302,10 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   if (parsed.followUpBehavior === "queue" || parsed.followUpBehavior === "steer") {
     preferences.followUpBehavior = parsed.followUpBehavior;
   }
+  if (parsed.speechEnvironmentId === null || isEnvironmentId(parsed.speechEnvironmentId)) {
+    preferences.speechEnvironmentId = parsed.speechEnvironmentId;
+  }
+
   if (Array.isArray(parsed.microphones)) {
     preferences.microphones = parsed.microphones.flatMap((entry): MicrophoneEntry[] => {
       if (typeof entry !== "object" || entry === null || !isMicrophoneKind(entry.kind)) return [];

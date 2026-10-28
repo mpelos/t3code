@@ -175,9 +175,11 @@ and use **Attach again** or remove the missing file before sending.
 
 ## Voice input and read aloud
 
-In **Settings → General → Speech** on web or desktop, or the environment's settings
-on mobile, select the environment running your chats, then configure one provider
-for dictation and one for narration. Dictation
+In **Settings → General → Speech**, choose the environment that will process speech
+for this device, then configure one provider for dictation and one for narration.
+This selection is remembered and applies to every chat, including chats whose agents
+run on another environment. The chosen environment must be connected; credentials
+stay in its secret store. Dictation
 supports OpenAI Whisper and Google Cloud Speech-to-Text. Narration supports OpenAI,
 ElevenLabs (Eleven v4), and Google Cloud Text-to-Speech. Each function can be disabled separately.
 
@@ -185,7 +187,10 @@ OpenAI and ElevenLabs use your API key; ElevenLabs also needs a voice ID. Google
 uses a service account JSON key from a project with billing and the corresponding
 API enabled. Choose a language code such as `pt-BR` for dictation, and a voice name
 and matching language for Google narration. Credentials are stored in the connected
-environment's secret store and are not sent back to clients.
+environment's secret store and are not sent back to clients. **Validate and save**
+tests the selected function before replacing its saved configuration; the short test
+request can consume provider credits. If a credential expires later, **Fix credentials**
+opens Speech settings for the selected Speech environment and affected function.
 
 Use the composer's microphone to record, then confirm to transcribe into your draft.
 Review and edit the text before sending. Canceling discards the recording and keeps

@@ -1,13 +1,12 @@
+import { Link } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import { useEffect, useSyncExternalStore } from "react";
 import { Atom } from "effect/reactivity";
 import { SquareIcon, Volume2Icon } from "lucide-react";
-import { AuthOrchestrationOperateScope, type EnvironmentId } from "@t3tools/contracts";
+import { type EnvironmentId } from "@t3tools/contracts";
 import { NarrationController } from "@t3tools/client-runtime/voice-input";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { speechEnvironment } from "~/state/speech";
-import { serverEnvironment } from "~/state/server";
-import { useEnvironmentScope } from "~/state/session";
+import { speechEnvironment, speechContextAtom } from "~/state/speech";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -70,10 +69,11 @@ export function ReadAloudButton({
 }) {
   const controller = useAtomValue(narrationAtom);
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
-  const configured = useAtomValue(serverEnvironment.configValueAtom(environmentId))?.settings.speech
-    .narration?.credential;
-  const allowed = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
-  const key = `${environmentId}:${owner}`;
+  const speech = useAtomValue(speechContextAtom);
+  const speechEnvironmentId = speech.environmentId;
+  const configured = speech.narration?.credential;
+  const allowed = speech.canOperate;
+  const key = `${speechEnvironmentId}:${environmentId}:${owner}`;
   const active = state.owner === key && state.phase !== "idle";
   const error = state.owner === key ? state.error : null;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- stops audio when its response leaves the timeline or its provider is disconnected
@@ -83,10 +83,13 @@ export function ReadAloudButton({
       if (controller.getSnapshot().owner === key) controller.stop();
     };
   }, [controller, key, configured]);
-  if (!configured) return null;
+  if (!configured || speechEnvironmentId === null) return null;
   const label = active ? "Stop reading aloud" : "Read aloud (AI-generated voice)";
   return (
-    <>
+    <div
+      className="flex min-w-0 flex-wrap items-center gap-2"
+      data-speech-active={active || Boolean(error) ? "true" : undefined}
+    >
       <Tooltip>
         <TooltipTrigger
           render={
@@ -97,7 +100,7 @@ export function ReadAloudButton({
               aria-label={label}
               disabled={!active && (!allowed || streaming || !text.trim())}
               onClick={() =>
-                active ? controller.stop() : void controller.start(key, text, environmentId)
+                active ? controller.stop() : void controller.start(key, text, speechEnvironmentId)
               }
             />
           }
@@ -112,11 +115,21 @@ export function ReadAloudButton({
         </TooltipTrigger>
         <TooltipPopup>{error ?? label}</TooltipPopup>
       </Tooltip>
+      {error && state.errorAction === "speech-settings" ? (
+        <Link
+          to="/settings/general"
+          search={{}}
+          hash="speech-narration"
+          onClick={() => controller.stop()}
+        >
+          Fix credentials
+        </Link>
+      ) : null}
       {error ? (
         <span role="alert" className="text-xs text-destructive-foreground">
           {error}
         </span>
       ) : null}
-    </>
+    </div>
   );
 }

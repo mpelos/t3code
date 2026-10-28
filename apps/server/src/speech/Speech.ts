@@ -4,6 +4,9 @@ import {
   SpeechError,
   type SpeechAudioFormat,
   type NarrationInput,
+  type SpeechConfigureInput,
+  type DictationSettings,
+  type NarrationSettings,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -13,6 +16,7 @@ import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http";
 import { importPKCS8, SignJWT } from "jose";
 import * as ServerSettings from "../serverSettings.ts";
+import { SECRET_REDACTED } from "../settingsSecrets.ts";
 
 const GoogleCredential = Schema.fromJsonString(
   Schema.Struct({
@@ -23,6 +27,7 @@ const GoogleCredential = Schema.fromJsonString(
   }),
 );
 const decodeGoogleCredential = Schema.decodeEffect(GoogleCredential);
+const GoogleTokenError = Schema.Struct({ error: Schema.String });
 const GoogleToken = Schema.Struct({ access_token: Schema.NonEmptyString });
 const Transcript = Schema.Struct({ text: Schema.String });
 const GoogleTranscript = Schema.Struct({
@@ -40,9 +45,19 @@ export class SpeechRequestError extends Schema.TaggedError<SpeechRequestError>()
   "SpeechRequestError",
   {
     reason: Schema.Literals(["invalid-credential", "unavailable", "invalid-response"]),
+    provider: SpeechError.fields.provider,
+    role: SpeechError.fields.role,
     cause: Schema.Defect(),
   },
-) {}
+) {
+  toClientError() {
+    return new SpeechError({
+      reason: this.reason,
+      ...(this.provider ? { provider: this.provider } : {}),
+      ...(this.role ? { role: this.role } : {}),
+    });
+  }
+}
 
 type SpeechOperationError =
   | SpeechError
@@ -52,6 +67,7 @@ type SpeechOperationError =
 export class Speech extends Context.Service<
   Speech,
   {
+    readonly configure: (input: SpeechConfigureInput) => Effect.Effect<void, SpeechOperationError>;
     readonly transcribe: (
       audio: Uint8Array,
       format: SpeechAudioFormat,
@@ -59,6 +75,24 @@ export class Speech extends Context.Service<
     readonly narrate: (input: NarrationInput) => Effect.Effect<Uint8Array, SpeechOperationError>;
   }
 >()("t3/speech/Speech") {}
+
+function validationRecording() {
+  const audio = new Uint8Array(16044);
+  const view = new DataView(audio.buffer);
+  audio.set(new TextEncoder().encode("RIFF"));
+  view.setUint32(4, audio.length - 8, true);
+  audio.set(new TextEncoder().encode("WAVEfmt "), 8);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 16000, true);
+  view.setUint32(28, 32000, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  audio.set(new TextEncoder().encode("data"), 36);
+  view.setUint32(40, audio.length - 44, true);
+  return audio;
+}
 
 const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
@@ -70,9 +104,20 @@ const make = Effect.gen(function* () {
     const response = yield* http
       .execute(request)
       .pipe(Effect.mapError((cause) => new SpeechRequestError({ reason: "unavailable", cause })));
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 400 && request.url === "https://oauth2.googleapis.com/token") {
+      const failure = yield* decode(response, GoogleTokenError);
+      return yield* new SpeechError({
+        reason:
+          failure.error === "invalid_grant" || failure.error === "invalid_client"
+            ? "invalid-credential"
+            : "rejected",
+      });
+    }
+    if (response.status === 401) {
       return yield* new SpeechError({ reason: "invalid-credential" });
     }
+    if (response.status === 403) return yield* new SpeechError({ reason: "permission-denied" });
+    if (response.status === 429) return yield* new SpeechError({ reason: "quota-exceeded" });
     if (response.status < 200 || response.status >= 300) {
       return yield* new SpeechError({
         reason: response.status >= 500 ? "unavailable" : "rejected",
@@ -118,12 +163,11 @@ const make = Effect.gen(function* () {
     return { authorization: `Bearer ${token.access_token}`, projectId: account.project_id };
   });
 
-  const transcribe = Effect.fn("Speech.transcribe")(function* (
+  const transcribeRecording = Effect.fn("Speech.transcribeRecording")(function* (
+    config: DictationSettings,
     audio: Uint8Array,
     format: SpeechAudioFormat,
   ) {
-    const config = (yield* settings.getSettings).speech.dictation;
-    if (!config?.credential) return yield* new SpeechError({ reason: "not-configured" });
     if (audio.byteLength === 0 || audio.byteLength > SPEECH_AUDIO_MAX_BYTES) {
       return yield* new SpeechError({ reason: "invalid-audio" });
     }
@@ -166,9 +210,10 @@ const make = Effect.gen(function* () {
     };
   });
 
-  const narrate = Effect.fn("Speech.narrate")(function* ({ text }: NarrationInput) {
-    const config = (yield* settings.getSettings).speech.narration;
-    if (!config?.credential) return yield* new SpeechError({ reason: "not-configured" });
+  const synthesize = Effect.fn("Speech.synthesize")(function* (
+    config: NarrationSettings,
+    { text }: NarrationInput,
+  ) {
     if (!text.trim() || new TextEncoder().encode(text).byteLength > NARRATION_CHUNK_MAX_BYTES) {
       return yield* new SpeechError({ reason: "invalid-text" });
     }
@@ -216,7 +261,94 @@ const make = Effect.gen(function* () {
     if (buffer.byteLength === 0) return yield* new SpeechError({ reason: "invalid-response" });
     return new Uint8Array(buffer);
   });
-  return Speech.of({ transcribe, narrate });
+  const contextualize = <A, E extends SpeechOperationError, R>(
+    role: "dictation" | "narration",
+    provider: DictationSettings["provider"] | NarrationSettings["provider"],
+    operation: Effect.Effect<A, E, R>,
+  ) =>
+    operation.pipe(
+      Effect.mapError((error) => {
+        if (error._tag === "SpeechError")
+          return new SpeechError({ reason: error.reason, role, provider });
+        if (error._tag === "SpeechRequestError")
+          return new SpeechRequestError({
+            reason: error.reason,
+            cause: error.cause,
+            role,
+            provider,
+          });
+        return error;
+      }),
+    );
+  const transcribe = Effect.fn("Speech.transcribe")(function* (
+    audio: Uint8Array,
+    format: SpeechAudioFormat,
+  ) {
+    const config = (yield* settings.getSettings).speech.dictation;
+    if (!config?.credential)
+      return yield* new SpeechError({ reason: "not-configured", role: "dictation" });
+    return yield* contextualize(
+      "dictation",
+      config.provider,
+      transcribeRecording(config, audio, format),
+    );
+  });
+  const narrate = Effect.fn("Speech.narrate")(function* (input: NarrationInput) {
+    const config = (yield* settings.getSettings).speech.narration;
+    if (!config?.credential)
+      return yield* new SpeechError({ reason: "not-configured", role: "narration" });
+    return yield* contextualize("narration", config.provider, synthesize(config, input));
+  });
+  const configure = Effect.fn("Speech.configure")(function* (input: SpeechConfigureInput) {
+    const current = (yield* settings.getSettings).speech[input.role];
+    const resolveConfig = <T extends DictationSettings | NarrationSettings>(config: T | null) =>
+      config === null
+        ? null
+        : {
+            ...config,
+            credential:
+              config.credential === SECRET_REDACTED
+                ? current?.provider === config.provider
+                  ? current.credential
+                  : ""
+                : config.credential,
+          };
+    const candidate =
+      input.role === "dictation"
+        ? { role: input.role, config: resolveConfig(input.config) }
+        : { role: input.role, config: resolveConfig(input.config) };
+    if (candidate.config) {
+      if (!candidate.config.credential)
+        return yield* new SpeechError({
+          reason: "invalid-credential",
+          role: input.role,
+          provider: candidate.config.provider,
+        });
+      const validation =
+        candidate.role === "dictation"
+          ? transcribeRecording(candidate.config, validationRecording(), "wav").pipe(Effect.asVoid)
+          : synthesize(candidate.config, { text: "Speech configuration test." }).pipe(
+              Effect.asVoid,
+            );
+      yield* contextualize(
+        candidate.role,
+        candidate.config.provider,
+        validation.pipe(
+          Effect.timeout("120 seconds"),
+          Effect.catchTags({
+            TimeoutError: () => Effect.fail(new SpeechError({ reason: "unavailable" })),
+          }),
+        ),
+      );
+    }
+    yield* settings.updateSettings({
+      speech:
+        candidate.role === "dictation"
+          ? { dictation: candidate.config }
+          : { narration: candidate.config },
+    });
+  });
+  return Speech.of({ transcribe, narrate, configure });
 });
 
 export const layer = Layer.effect(Speech, make);

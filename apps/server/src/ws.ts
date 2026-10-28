@@ -1,3 +1,4 @@
+import * as Speech from "./speech/Speech.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -1332,6 +1333,7 @@ export const layerWsRpc = (
       const storageCleanup = yield* StorageCleanup.StorageCleanup;
       const databaseStorage = yield* DatabaseStorage.DatabaseStorage;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const speech = yield* Speech.Speech;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -2495,6 +2497,12 @@ export const layerWsRpc = (
         [WS_METHODS.peerLinksAnswerRequest]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(peerLinkRequests.answer(input)),
+          ),
+        [WS_METHODS.speechConfigure]: (input) =>
+          speech.configure(input).pipe(
+            Effect.catchTags({
+              SpeechRequestError: (error) => Effect.fail(error.toClientError()),
+            }),
           ),
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */

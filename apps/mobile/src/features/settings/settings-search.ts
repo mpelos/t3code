@@ -33,6 +33,11 @@ const SETTINGS_SEARCH_TERMS = {
   SettingsScheduledTasks: ["automations", "schedule", "cron", "recurring", "webhook"],
   SettingsProjectOverview: ["project", "overview", "checkouts", "delete project"],
   SettingsOrganization: [
+    "speech",
+    "dictation",
+    "read aloud",
+    "whisper",
+    "elevenlabs",
     "project grouping",
     "group projects",
     "organization",

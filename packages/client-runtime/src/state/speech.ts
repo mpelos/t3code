@@ -1,11 +1,21 @@
-import { SpeechError, type SpeechAudioFormat, type NarrationInput } from "@t3tools/contracts";
+import {
+  SpeechError,
+  AuthOrchestrationOperateScope,
+  sessionGrantsScope,
+  type EnvironmentId,
+  type ServerSettings,
+  type AuthSessionState,
+  type SpeechAudioFormat,
+  type NarrationInput,
+  WS_METHODS,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { HttpClient } from "effect/http";
-import type { Atom } from "effect/reactivity";
+import { Atom, AsyncResult } from "effect/reactivity";
 import * as RemoteAuthorization from "../authorization/service.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as Supervisor from "../connection/supervisor.ts";
@@ -13,7 +23,42 @@ import * as ManagedRelay from "../relay/managedRelay.ts";
 import type { PreparedConnection } from "../connection/model.ts";
 import type { RemoteEnvironmentRequestError } from "../rpc/http.ts";
 import { executeAuthenticatedEnvironmentHttpRequest } from "./environmentHttpAuth.ts";
-import { createEnvironmentCommand } from "./runtime.ts";
+import { createEnvironmentCommand, createEnvironmentRpcCommand } from "./runtime.ts";
+
+export function createSpeechContextAtom(input: {
+  readonly environmentIdAtom: Atom.Atom<EnvironmentId | null>;
+  readonly configValueAtom: (
+    environmentId: EnvironmentId,
+  ) => Atom.Atom<{ readonly settings: Pick<ServerSettings, "speech"> } | null>;
+  readonly sessionStateAtom: (
+    environmentId: EnvironmentId,
+  ) => Atom.Atom<AsyncResult.AsyncResult<AuthSessionState, unknown>>;
+}) {
+  return Atom.make((get) => {
+    const environmentId = get(input.environmentIdAtom);
+    const config = environmentId === null ? null : get(input.configValueAtom(environmentId));
+    const result = environmentId === null ? null : get(input.sessionStateAtom(environmentId));
+    const session = result === null ? null : AsyncResult.getOrElse(result, () => null);
+    const next = {
+      environmentId,
+      dictation: config?.settings.speech.dictation ?? null,
+      narration: config?.settings.speech.narration ?? null,
+      canOperate:
+        result !== null &&
+        !AsyncResult.isFailure(result) &&
+        session !== null &&
+        sessionGrantsScope(session, AuthOrchestrationOperateScope),
+    };
+    const previous = Option.getOrNull(get.self<typeof next>());
+    return previous !== null &&
+      previous.environmentId === next.environmentId &&
+      previous.dictation === next.dictation &&
+      previous.narration === next.narration &&
+      previous.canOperate === next.canOperate
+      ? previous
+      : next;
+  }).pipe(Atom.withLabel("speech:context"));
+}
 
 export class SpeechClient extends Context.Service<
   SpeechClient,
@@ -95,6 +140,10 @@ export function createSpeechEnvironmentCommands<R, E>(
     return { prepared: prepared.value, client: yield* SpeechClient };
   });
   return {
+    configure: createEnvironmentRpcCommand(runtime, {
+      label: "speech:configure",
+      tag: WS_METHODS.speechConfigure,
+    }),
     transcribe: createEnvironmentCommand(runtime, {
       label: "speech:transcribe",
       execute: (input: {

@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
-import { AuthOrchestrationOperateScope, type EnvironmentId } from "@t3tools/contracts";
-import { serverEnvironment } from "../../state/server";
-import { useEnvironmentScope } from "../../state/session";
+import { type EnvironmentId } from "@t3tools/contracts";
+import { speechContextAtom } from "../../state/speech";
+import { useNavigation } from "@react-navigation/native";
 import { useFocusEffect } from "@react-navigation/native";
 import { useCallback, useEffect, useRef } from "react";
 import {
@@ -26,9 +26,10 @@ export function useVoiceInputController(input: {
   readonly onChangeDraftMessage: (value: string) => void;
   readonly onChangeSelection: (selection: ComposerEditorSelection) => void;
 }) {
+  const navigation = useNavigation();
   const global = useGlobalVoiceInput();
-  const config = useAtomValue(serverEnvironment.configValueAtom(input.environmentId));
-  const allowed = useEnvironmentScope(input.environmentId, AuthOrchestrationOperateScope);
+  const speech = useAtomValue(speechContextAtom);
+  const allowed = speech.canOperate;
   const { session } = global;
   const latestInput = useRef(input);
   // oxlint-disable-next-line react/refs -- Transcription finishes asynchronously and must reach the composer's current selection setter, not the one captured at start.
@@ -75,9 +76,15 @@ export function useVoiceInputController(input: {
   const isBusy = voiceInputBlocksSubmission(state);
   return {
     isAvailable:
-      Boolean(config?.settings.speech.dictation?.credential && allowed) &&
+      input.environmentId !== null &&
+      input.ownerKey !== null &&
+      Boolean(speech.dictation?.credential && allowed) &&
       (!global.isBusy || global.ownerKey === input.ownerKey),
     state,
+    openSpeechSettings: () => {
+      session.cancel(input.ownerKey);
+      navigation.navigate("SettingsSpeech", { role: "dictation" });
+    },
     audioLevels: global.audioLevels,
     elapsedSeconds: global.elapsedSeconds,
     isBusy,

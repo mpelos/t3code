@@ -1,3 +1,4 @@
+import { speechErrorRequiresConfiguration } from "./settings.ts";
 /** Cancellation is cooperative: settle only after the underlying work has stopped. */
 export type VoiceTranscriptionOptions = {
   readonly signal: AbortSignal;
@@ -13,7 +14,10 @@ export type VoiceTranscriber = {
   readonly prepare: (options: VoiceTranscriptionOptions) => Promise<PreparedVoiceTranscription>;
 };
 
-export type VoiceTranscriptionErrorCode = "transcription-failed" | "cancelled";
+export type VoiceTranscriptionErrorCode =
+  | "transcription-failed"
+  | "configuration-required"
+  | "cancelled";
 
 export class VoiceTranscriptionError extends Error {
   readonly code: VoiceTranscriptionErrorCode;
@@ -29,4 +33,12 @@ export function throwIfVoiceTranscriptionAborted(signal: AbortSignal): void {
   if (signal.aborted) {
     throw new VoiceTranscriptionError("cancelled", "Voice transcription was cancelled.");
   }
+}
+
+export function voiceTranscriptionFailure(cause: unknown): VoiceTranscriptionError {
+  return new VoiceTranscriptionError(
+    speechErrorRequiresConfiguration(cause) ? "configuration-required" : "transcription-failed",
+    cause instanceof Error ? cause.message : "Could not transcribe this recording.",
+    { cause },
+  );
 }
