@@ -260,8 +260,21 @@ function SpeechForm({
             ? field("language", "Language code (pt-BR)")
             : null}
           {role === "narration" && draft.provider !== "qwen"
-            ? field("voice", draft.provider === "elevenlabs" ? "ElevenLabs voice ID" : "Voice name")
+            ? field(
+                "voice",
+                draft.provider === "fish"
+                  ? "Fish Audio voice ID (reference_id)"
+                  : draft.provider === "elevenlabs"
+                    ? "ElevenLabs voice ID"
+                    : "Voice name",
+              )
             : null}
+          {draft.provider === "fish" ? (
+            <Text className="text-sm text-foreground-muted">
+              Copy the voice ID from a voice on fish.audio. Narration uses S2.1 Pro and detects the
+              text language automatically.
+            </Text>
+          ) : null}
           {role === "dictation" && draft.provider === "google" ? (
             <Text className="text-sm text-foreground-muted">Up to 60 seconds per dictation.</Text>
           ) : null}

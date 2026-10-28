@@ -27,6 +27,39 @@ it("builds and restores local narration without credentials while keeping it out
   expect(narrationSettingsFromDraft(selectSpeechProvider(draft, "disabled"), config)).toBeNull();
 });
 
+it("requires a Fish voice and credentials, reuses only its stored key, and allows disabling", () => {
+  const draft = selectSpeechProvider(speechSettingsDraft(null), "fish");
+  expect(speechProviderOptions("narration").map(({ value }) => value)).toContain("fish");
+  expect(speechProviderOptions("dictation").map(({ value }) => value)).not.toContain("fish");
+  expect(() => dictationSettingsFromDraft(draft, null)).toThrow("Choose OpenAI or Google Cloud");
+  expect(() => narrationSettingsFromDraft(draft, null)).toThrow("Enter credentials");
+  expect(() => narrationSettingsFromDraft({ ...draft, credential: "key" }, null)).toThrow(
+    "Enter a voice",
+  );
+  const config = narrationSettingsFromDraft(
+    { ...draft, credential: " key ", voice: " voice-id " },
+    null,
+  );
+  expect(config).toEqual({ provider: "fish", credential: "key", voice: "voice-id" });
+  expect(isNarrationConfigured(config)).toBe(true);
+  const restored = speechSettingsDraft(config);
+  expect(restored.credential).toBe("");
+  expect(narrationSettingsFromDraft(restored, config)).toEqual(config);
+  expect(() =>
+    narrationSettingsFromDraft(restored, {
+      provider: "elevenlabs",
+      credential: "other-key",
+      voice: "other-voice",
+    }),
+  ).toThrow("Enter credentials");
+  expect(narrationSettingsFromDraft(selectSpeechProvider(restored, "disabled"), config)).toBeNull();
+  expect(
+    speechErrorRequiresConfiguration(
+      new SpeechError({ provider: "fish", reason: "invalid-credential" }),
+    ),
+  ).toBe(true);
+});
+
 it.each([
   "file:///tmp/model",
   "http://key:secret@localhost:18320",

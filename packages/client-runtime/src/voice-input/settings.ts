@@ -12,6 +12,7 @@ const SPEECH_PROVIDERS = [
   { value: "openai", label: "OpenAI" },
   { value: "google", label: "Google Cloud" },
   { value: "elevenlabs", label: "ElevenLabs" },
+  { value: "fish", label: "Fish Audio" },
   { value: "qwen", label: "Qwen3-TTS (local)" },
 ] as const;
 export function speechProviderOptions(role: "dictation" | "narration") {
@@ -80,7 +81,7 @@ export function dictationSettingsFromDraft(
   current: DictationSettings | null,
 ): DictationSettings | null {
   if (draft.provider === "disabled") return null;
-  if (draft.provider === "elevenlabs" || draft.provider === "qwen")
+  if (draft.provider !== "openai" && draft.provider !== "google")
     throw new Error("Choose OpenAI or Google Cloud for dictation.");
   if (!draft.language.trim()) throw new Error("Enter a language code, such as pt-BR.");
   return {

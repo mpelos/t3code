@@ -119,7 +119,8 @@ const make = Effect.gen(function* () {
       return yield* new SpeechError({ reason: "invalid-credential" });
     }
     if (response.status === 403) return yield* new SpeechError({ reason: "permission-denied" });
-    if (response.status === 429) return yield* new SpeechError({ reason: "quota-exceeded" });
+    if (response.status === 402 || response.status === 429)
+      return yield* new SpeechError({ reason: "quota-exceeded" });
     if (response.status < 200 || response.status >= 300) {
       return yield* new SpeechError({
         reason: response.status >= 500 ? "unavailable" : "rejected",
@@ -264,6 +265,17 @@ const make = Effect.gen(function* () {
           }),
         );
         break;
+      case "fish":
+        request = HttpClientRequest.post("https://api.fish.audio/v1/tts").pipe(
+          HttpClientRequest.setHeader("authorization", `Bearer ${config.credential}`),
+          HttpClientRequest.setHeader("model", "s2.1-pro"),
+          HttpClientRequest.bodyJsonUnsafe({
+            text,
+            reference_id: config.voice,
+            format: "mp3",
+          }),
+        );
+        break;
       case "qwen": {
         const base = config.baseUrl.endsWith("/") ? config.baseUrl : `${config.baseUrl}/`;
         request = HttpClientRequest.post(new URL("v1/audio/speech", base).href).pipe(
@@ -282,7 +294,7 @@ const make = Effect.gen(function* () {
     }
     const response = yield* execute(request);
     if (
-      config.provider === "qwen" &&
+      (config.provider === "qwen" || config.provider === "fish") &&
       !/^audio\/(?:mpeg|mp3)(?:;|$)/i.test(response.headers["content-type"] ?? "")
     )
       return yield* new SpeechError({ reason: "invalid-response" });

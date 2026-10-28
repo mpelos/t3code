@@ -1830,9 +1830,9 @@ it.layer(NodeServices.layer)("server settings", (it) => {
   );
 });
 
-it.effect(
-  "stores speech credentials in the vault, preserves them on redacted edits, and removes retired providers",
-  () =>
+it.effect.each(["elevenlabs", "fish"] as const)(
+  "stores speech credentials in the vault, preserves them on redacted edits, and removes retired providers (%s)",
+  (provider) =>
     Effect.gen(function* () {
       const settings = yield* ServerSettingsModule.ServerSettingsService;
       const config = yield* ServerConfig.ServerConfig;
@@ -1841,7 +1841,7 @@ it.effect(
       const saved = yield* settings.updateSettings({
         speech: {
           dictation: { provider: "openai", credential: "dictation-secret", language: "pt-BR" },
-          narration: { provider: "elevenlabs", credential: "narration-secret", voice: "voice-1" },
+          narration: { provider, credential: "narration-secret", voice: "voice-1" },
         },
       });
       const raw = yield* fs.readFileString(config.settingsPath);
@@ -1849,8 +1849,8 @@ it.effect(
       assert.notInclude(raw, "narration-secret");
       const redacted = ServerSettingsModule.redactServerSettingsForClient(saved).speech;
       assert.notEqual(redacted.dictation?.credential, "dictation-secret");
-      if (redacted.narration?.provider !== "elevenlabs")
-        throw new Error("Expected ElevenLabs narration");
+      if (redacted.narration?.provider !== provider)
+        throw new Error("Expected configured narration");
       yield* settings.updateSettings({
         speech: { narration: redacted.narration && { ...redacted.narration, voice: "voice-2" } },
       });
@@ -1871,7 +1871,7 @@ it.effect(
         language: "Portuguese",
       } as const;
       yield* settings.updateSettings({ speech: { narration: local } });
-      assert.isTrue(Option.isNone(yield* secrets.get("speech-narration-elevenlabs")));
+      assert.isTrue(Option.isNone(yield* secrets.get(`speech-narration-${provider}`)));
       assert.deepEqual(
         ServerSettingsModule.redactServerSettingsForClient(yield* settings.getSettings).speech
           .narration,
@@ -1880,7 +1880,7 @@ it.effect(
       const onDisk = yield* decodeServerSettingsJson(yield* fs.readFileString(config.settingsPath));
       assert.deepEqual(onDisk.speech.narration, local);
       yield* settings.updateSettings({ speech: { narration: null } });
-      assert.isTrue(Option.isNone(yield* secrets.get("speech-narration-elevenlabs")));
+      assert.isTrue(Option.isNone(yield* secrets.get(`speech-narration-${provider}`)));
       assert.equal((yield* settings.getSettings).speech.dictation?.credential, "google-secret");
     }).pipe(
       Effect.provide(layerServerSettingsWithSecrets().pipe(Layer.provideMerge(NodeServices.layer))),

@@ -38,6 +38,7 @@ const SETTINGS_SEARCH_TERMS = {
     "read aloud",
     "whisper",
     "elevenlabs",
+    "fish audio",
     "qwen",
     "mlx",
     "local voice",

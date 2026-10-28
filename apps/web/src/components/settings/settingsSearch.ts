@@ -219,6 +219,7 @@ export const SETTINGS_SEARCH_ITEMS = [
       "read aloud",
       "narration",
       "elevenlabs",
+      "fish audio",
       "qwen",
       "mlx",
       "local voice",

@@ -285,11 +285,23 @@ function SpeechForm({
             {role === "narration" && draft.provider !== "qwen" ? (
               <Input
                 aria-label="Narration voice"
-                placeholder={draft.provider === "elevenlabs" ? "ElevenLabs voice ID" : "Voice name"}
+                placeholder={
+                  draft.provider === "fish"
+                    ? "Fish Audio voice ID (reference_id)"
+                    : draft.provider === "elevenlabs"
+                      ? "ElevenLabs voice ID"
+                      : "Voice name"
+                }
                 value={draft.voice}
                 disabled={disabled}
                 onChange={(event) => changeDraft({ ...draft, voice: event.target.value })}
               />
+            ) : null}
+            {draft.provider === "fish" ? (
+              <p className="text-xs text-muted-foreground">
+                Copy the voice ID from a voice on fish.audio. Narration uses S2.1 Pro and detects
+                the text language automatically.
+              </p>
             ) : null}
             {role === "dictation" && draft.provider === "google" ? (
               <p className="text-xs text-muted-foreground">

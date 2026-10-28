@@ -25,7 +25,9 @@ export function isNarrationConfigured(config: NarrationSettings | null | undefin
 export class SpeechError extends Schema.TaggedError<SpeechError>()(
   "SpeechError",
   {
-    provider: Schema.optionalKey(Schema.Literals(["openai", "google", "elevenlabs", "qwen"])),
+    provider: Schema.optionalKey(
+      Schema.Literals(["openai", "google", "elevenlabs", "fish", "qwen"]),
+    ),
     role: Schema.optionalKey(Schema.Literals(["dictation", "narration"])),
     reason: Schema.Literals([
       "not-configured",
@@ -49,9 +51,11 @@ export class SpeechError extends Schema.TaggedError<SpeechError>()(
           ? "Google Cloud"
           : this.provider === "elevenlabs"
             ? "ElevenLabs"
-            : this.provider === "qwen"
-              ? "Qwen3-TTS"
-              : "Speech";
+            : this.provider === "fish"
+              ? "Fish Audio"
+              : this.provider === "qwen"
+                ? "Qwen3-TTS"
+                : "Speech";
     const context = `${provider}${this.role ? ` ${this.role}` : ""}: `;
     if (this.provider === "qwen") {
       switch (this.reason) {

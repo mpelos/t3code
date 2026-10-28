@@ -121,25 +121,30 @@ it.effect("sends a Whisper recording with the configured language and returns th
   }),
 );
 
-it.effect.each(["openai", "elevenlabs"] as const)(
+it.effect.each(["openai", "elevenlabs", "fish"] as const)(
   "synthesizes MP3 using %s credentials and voice",
   (provider) =>
     Effect.gen(function* () {
       const layer = testLayer(
         { dictation: null, narration: { provider, credential: "voice-key", voice: "voice-id" } },
         (request) => {
-          expect(request.headers[provider === "openai" ? "authorization" : "xi-api-key"]).toBe(
-            provider === "openai" ? "Bearer voice-key" : "voice-key",
+          expect(request.headers[provider === "elevenlabs" ? "xi-api-key" : "authorization"]).toBe(
+            provider === "elevenlabs" ? "voice-key" : "Bearer voice-key",
           );
+          if (provider === "fish") expect(request.headers.model).toBe("s2.1-pro");
           expect(jsonBody(request)).toMatchObject(
             provider === "openai"
               ? { voice: "voice-id", input: "Hello" }
-              : { inputs: [{ text: "Hello", voice_id: "voice-id" }], model_id: "eleven_v4" },
+              : provider === "fish"
+                ? { text: "Hello", reference_id: "voice-id", format: "mp3" }
+                : { inputs: [{ text: "Hello", voice_id: "voice-id" }], model_id: "eleven_v4" },
           );
           expect(request.url).toBe(
             provider === "openai"
               ? "https://api.openai.com/v1/audio/speech"
-              : "https://api.elevenlabs.io/v1/text-to-dialogue?output_format=mp3_44100_128",
+              : provider === "fish"
+                ? "https://api.fish.audio/v1/tts"
+                : "https://api.elevenlabs.io/v1/text-to-dialogue?output_format=mp3_44100_128",
           );
           return new Response(new Uint8Array([73, 68, 51]), {
             headers: { "content-type": "audio/mpeg" },
@@ -233,9 +238,30 @@ it.effect(
     }),
 );
 
+it.effect.each([
+  { body: '{"message":"private details"}', contentType: "application/json" },
+  { body: "", contentType: "audio/mpeg" },
+])("rejects a non-playable Fish response %j", ({ body, contentType }) =>
+  Effect.gen(function* () {
+    const layer = testLayer(
+      { dictation: null, narration: { provider: "fish", credential: "key", voice: "voice-id" } },
+      () => new Response(body, { headers: { "content-type": contentType } }),
+    );
+    const error = yield* Effect.gen(function* () {
+      return yield* (yield* Speech.Speech).narrate({ text: "Hello" });
+    }).pipe(Effect.provide(layer), Effect.flip);
+    expect(error).toMatchObject({
+      reason: "invalid-response",
+      provider: "fish",
+      role: "narration",
+    });
+    expect(error.message).not.toContain("private");
+  }),
+);
+
 it.effect.each(
-  [401, 403, 422, 429, 503].flatMap((status) =>
-    ["elevenlabs", "qwen"].map((provider) => ({ status, provider })),
+  [401, 402, 403, 422, 429, 503].flatMap((status) =>
+    (["elevenlabs", "fish", "qwen"] as const).map((provider) => ({ status, provider })),
   ),
 )("reports safe errors for upstream HTTP %j", ({ status, provider }) =>
   Effect.gen(function* () {
@@ -250,7 +276,7 @@ it.effect.each(
                 voice: "Ryan",
                 language: "Portuguese",
               }
-            : { provider: "elevenlabs", credential: "secret", voice: "voice-id" },
+            : { provider, credential: "secret", voice: "voice-id" },
       },
       () => new Response("private response details", { status }),
     );
@@ -266,7 +292,7 @@ it.effect.each(
           ? "invalid-credential"
           : status === 403
             ? "permission-denied"
-            : status === 429
+            : status === 402 || status === 429
               ? "quota-exceeded"
               : status === 503
                 ? "unavailable"
@@ -274,7 +300,11 @@ it.effect.each(
     });
     expect(error.message).not.toContain("private");
     expect(error.message).toContain(
-      provider === "qwen" ? "Qwen3-TTS narration" : "ElevenLabs narration",
+      provider === "qwen"
+        ? "Qwen3-TTS narration"
+        : provider === "fish"
+          ? "Fish Audio narration"
+          : "ElevenLabs narration",
     );
     if (provider === "qwen") expect(error.message).not.toMatch(/billing|balance|API key/);
   }),
@@ -312,31 +342,38 @@ it.effect(
     }),
 );
 
-it.effect.each(["dictation", "narration"] as const)(
+it.effect.each(["dictation", "elevenlabs", "fish"] as const)(
   "validates %s before saving and preserves the previous configuration on rejection",
-  (role) =>
+  (target) =>
     Effect.gen(function* () {
+      const role = target === "dictation" ? "dictation" : "narration";
       let status = 401;
       let requests = 0;
       const config =
-        role === "dictation"
+        target === "dictation"
           ? {
-              role,
+              role: "dictation" as const,
               config: { provider: "openai" as const, credential: "new-key", language: "pt-BR" },
             }
           : {
-              role,
-              config: { provider: "elevenlabs" as const, credential: "new-key", voice: "voice-id" },
+              role: "narration" as const,
+              config: {
+                provider: target,
+                credential: "new-key",
+                voice: "voice-id",
+              },
             };
       const layer = testLayer({ dictation: null, narration: null }, (request) => {
         requests++;
-        expect(request.headers[role === "dictation" ? "authorization" : "xi-api-key"]).toBe(
-          role === "dictation" ? "Bearer new-key" : "new-key",
+        expect(request.headers[target === "elevenlabs" ? "xi-api-key" : "authorization"]).toBe(
+          target === "elevenlabs" ? "new-key" : "Bearer new-key",
         );
         return status === 200
           ? role === "dictation"
             ? Response.json({ text: "" })
-            : new Response(new Uint8Array([73, 68, 51]))
+            : new Response(new Uint8Array([73, 68, 51]), {
+                headers: { "content-type": "audio/mpeg" },
+              })
           : new Response("private provider details", { status });
       });
       yield* Effect.gen(function* () {

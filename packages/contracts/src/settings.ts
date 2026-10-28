@@ -909,7 +909,7 @@ export const QwenNarrationSettings = Schema.Struct({
 export const NarrationSettings = Schema.Union([
   QwenNarrationSettings,
   Schema.Struct({
-    provider: Schema.Literals(["openai", "elevenlabs"]),
+    provider: Schema.Literals(["openai", "elevenlabs", "fish"]),
     credential: SpeechCredential,
     voice: TrimmedNonEmptyString,
   }),
