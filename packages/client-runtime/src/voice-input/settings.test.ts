@@ -40,11 +40,19 @@ it("requires a Fish voice and credentials, reuses only its stored key, and allow
     { ...draft, credential: " key ", voice: " voice-id " },
     null,
   );
-  expect(config).toEqual({ provider: "fish", credential: "key", voice: "voice-id" });
+  expect(config).toEqual({
+    provider: "fish",
+    credential: "key",
+    voice: "voice-id",
+    model: "s2.1-pro-free",
+  });
   expect(isNarrationConfigured(config)).toBe(true);
   const restored = speechSettingsDraft(config);
   expect(restored.credential).toBe("");
   expect(narrationSettingsFromDraft(restored, config)).toEqual(config);
+  const paid = narrationSettingsFromDraft({ ...restored, fishModel: "s2.1-pro" }, config);
+  expect(paid).toMatchObject({ provider: "fish", model: "s2.1-pro", credential: "key" });
+  expect(speechSettingsDraft(paid).fishModel).toBe("s2.1-pro");
   expect(() =>
     narrationSettingsFromDraft(restored, {
       provider: "elevenlabs",

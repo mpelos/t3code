@@ -78,42 +78,49 @@ vi.mock(import("./useSettingsProjectGroups"), () => ({ useSettingsProjectGroups:
 import { SettingsScopeProvider } from "./SettingsScopeContext";
 import { SpeechSettings } from "./SpeechSettings";
 
-it("configures Fish narration on the selected host and keeps input available after key rejection", async () => {
-  state.environments = [environment("Server")];
-  state.primaryId = EnvironmentId.make("Server");
-  state.selectedId = EnvironmentId.make("Server");
-  for (const listener of state.listeners) listener();
-  state.update.mockReset().mockResolvedValue(AsyncResult.success(undefined));
-  await using screen = await render(<SpeechSettings />);
-  await userEvent.click(screen.getByRole("combobox", { name: "Read aloud provider" }));
-  await userEvent.click(page.getByRole("option", { name: "Fish Audio", exact: true }));
-  await userEvent.type(screen.getByLabelText("Read aloud credentials"), "fish-key");
-  await userEvent.type(screen.getByLabelText("Narration voice"), "fish-voice-id");
-  state.update.mockResolvedValueOnce(
-    AsyncResult.failure(
-      Cause.fail(
-        new SpeechError({ provider: "fish", role: "narration", reason: "invalid-credential" }),
+it.each(["s2.1-pro-free", "s2.1-pro"] as const)(
+  "configures Fish narration with %s and keeps input available after key rejection",
+  async (model) => {
+    state.environments = [environment("Server")];
+    state.primaryId = EnvironmentId.make("Server");
+    state.selectedId = EnvironmentId.make("Server");
+    for (const listener of state.listeners) listener();
+    state.update.mockReset().mockResolvedValue(AsyncResult.success(undefined));
+    await using screen = await render(<SpeechSettings />);
+    await userEvent.click(screen.getByRole("combobox", { name: "Read aloud provider" }));
+    await userEvent.click(page.getByRole("option", { name: "Fish Audio", exact: true }));
+    if (model === "s2.1-pro") {
+      await userEvent.click(screen.getByRole("combobox", { name: "Read aloud model" }));
+      await userEvent.click(page.getByRole("option", { name: "S2.1 Pro (paid)", exact: true }));
+    }
+    await userEvent.type(screen.getByLabelText("Read aloud credentials"), "fish-key");
+    await userEvent.type(screen.getByLabelText("Narration voice"), "fish-voice-id");
+    state.update.mockResolvedValueOnce(
+      AsyncResult.failure(
+        Cause.fail(
+          new SpeechError({ provider: "fish", role: "narration", reason: "invalid-credential" }),
+        ),
       ),
-    ),
-  );
-  await userEvent.click(screen.getByRole("button", { name: "Validate and save read aloud" }));
-  await expect
-    .element(screen.getByRole("alert"))
-    .toMatchTextContent(/Fish Audio narration: The API key is invalid or expired/);
-  await expect.element(screen.getByLabelText("Read aloud credentials")).toHaveValue("fish-key");
-  await userEvent.click(screen.getByRole("button", { name: "Validate and save read aloud" }));
-  await expect
-    .element(screen.getByRole("status"))
-    .toHaveTextContent("Credentials verified and saved.");
-  await expect.element(screen.getByLabelText("Read aloud credentials")).toHaveValue("");
-  expect(state.update).toHaveBeenLastCalledWith({
-    environmentId: EnvironmentId.make("Server"),
-    input: {
-      role: "narration",
-      config: { provider: "fish", credential: "fish-key", voice: "fish-voice-id" },
-    },
-  });
-});
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Validate and save read aloud" }));
+    await expect
+      .element(screen.getByRole("alert"))
+      .toMatchTextContent(/Fish Audio narration: The API key is invalid or expired/);
+    await expect.element(screen.getByLabelText("Read aloud credentials")).toHaveValue("fish-key");
+    await userEvent.click(screen.getByRole("button", { name: "Validate and save read aloud" }));
+    await expect
+      .element(screen.getByRole("status"))
+      .toHaveTextContent("Credentials verified and saved.");
+    await expect.element(screen.getByLabelText("Read aloud credentials")).toHaveValue("");
+    expect(state.update).toHaveBeenLastCalledWith({
+      environmentId: EnvironmentId.make("Server"),
+      input: {
+        role: "narration",
+        config: { provider: "fish", credential: "fish-key", voice: "fish-voice-id", model },
+      },
+    });
+  },
+);
 
 it("configures a local voice without credentials and preserves its voice and language", async () => {
   state.environments = [environment("Server")];

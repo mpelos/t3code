@@ -27,6 +27,25 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
+it.each([undefined, "s2.1-pro-free", "s2.1-pro", "unknown"] as const)(
+  "preserves the Fish narration model %s through storage, defaulting legacy configurations to paid",
+  (model) => {
+    const narration = {
+      provider: "fish",
+      credential: "key",
+      voice: "voice-id",
+      ...(model === undefined ? {} : { model }),
+    };
+    if (model === "unknown") {
+      expect(() => decodeServerSettings({ speech: { narration } })).toThrow();
+      return;
+    }
+    const decoded = decodeServerSettings({ speech: { narration } });
+    expect(decoded.speech.narration).toEqual({ ...narration, model: model ?? "s2.1-pro" });
+    expect(decodeServerSettings(encodeServerSettings(decoded)).speech).toEqual(decoded.speech);
+  },
+);
+
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();

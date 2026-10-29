@@ -182,12 +182,16 @@ This selection is remembered and applies to every chat, including chats whose ag
 run on another environment. The chosen environment must be connected; credentials
 stay in its secret store. Dictation
 supports OpenAI Whisper and Google Cloud Speech-to-Text. Narration supports OpenAI,
-ElevenLabs (Eleven v4), Fish Audio (S2.1 Pro), Google Cloud Text-to-Speech, and local
+ElevenLabs (Eleven v4), Fish Audio (S2.1 Pro Free or S2.1 Pro), Google Cloud Text-to-Speech, and local
 Qwen3-TTS with preset voices. Each function can be disabled separately.
 
 OpenAI, ElevenLabs, and Fish Audio use your API key. ElevenLabs and Fish Audio also
 need a voice ID; for Fish Audio, copy the ID from the voice's page on fish.audio
-(`reference_id`). Fish Audio detects the text language automatically. Google
+(`reference_id`). For Fish Audio, choose **S2.1 Pro Free** to use the free tier, subject
+to the provider's usage limits, or **S2.1 Pro (paid)** to use your API credit. New
+configurations start with Free; existing configurations keep the paid model until
+you change it. The chosen model is used for both validation and narration. Fish Audio
+detects the text language automatically. Google
 uses a service account JSON key from a project with billing and the corresponding
 API enabled. Choose a language code such as `pt-BR` for dictation, and a voice name
 and matching language for Google narration. Credentials are stored in the connected

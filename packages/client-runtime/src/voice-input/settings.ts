@@ -3,6 +3,7 @@ import {
   SpeechError,
   DEFAULT_QWEN_NARRATION_URL,
   QwenNarrationSettings,
+  type FishNarrationModel,
   type DictationSettings,
   type NarrationSettings,
 } from "@t3tools/contracts";
@@ -23,6 +24,10 @@ export function speechProviderOptions(role: "dictation" | "narration") {
       );
 }
 export type SpeechProvider = (typeof SPEECH_PROVIDERS)[number]["value"];
+export const fishNarrationModelOptions = [
+  { value: "s2.1-pro-free", label: "S2.1 Pro Free" },
+  { value: "s2.1-pro", label: "S2.1 Pro (paid)" },
+] as const;
 const decodeQwenNarrationSettings = Schema.decodeUnknownSync(QwenNarrationSettings);
 export type SpeechSettingsDraft = {
   readonly provider: SpeechProvider;
@@ -30,6 +35,7 @@ export type SpeechSettingsDraft = {
   readonly language: string;
   readonly voice: string;
   readonly baseUrl: string;
+  readonly fishModel: typeof FishNarrationModel.Type;
 };
 
 export function speechSettingsDraft(
@@ -41,6 +47,7 @@ export function speechSettingsDraft(
     language: config && "language" in config ? config.language : "en-US",
     voice: config && "voice" in config ? config.voice : "coral",
     baseUrl: config?.provider === "qwen" ? config.baseUrl : DEFAULT_QWEN_NARRATION_URL,
+    fishModel: config?.provider === "fish" ? config.model : "s2.1-pro-free",
   };
 }
 
@@ -106,6 +113,9 @@ export function narrationSettingsFromDraft(
   }
   const credential = credentialFor(draft, current);
   if (!draft.voice.trim()) throw new Error("Enter a voice name or ID.");
+  if (draft.provider === "fish") {
+    return { provider: "fish", credential, voice: draft.voice.trim(), model: draft.fishModel };
+  }
   if (draft.provider === "google") {
     if (!draft.language.trim()) throw new Error("Enter a language code, such as pt-BR.");
     return {
@@ -127,6 +137,7 @@ export function speechErrorRequiresConfiguration(error: unknown): boolean {
       (error.reason === "unavailable" || error.reason === "invalid-response")) ||
       error.reason === "invalid-credential" ||
       error.reason === "permission-denied" ||
+      error.reason === "insufficient-credit" ||
       error.reason === "not-configured" ||
       error.reason === "rejected")
   );

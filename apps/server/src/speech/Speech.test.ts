@@ -121,41 +121,42 @@ it.effect("sends a Whisper recording with the configured language and returns th
   }),
 );
 
-it.effect.each(["openai", "elevenlabs", "fish"] as const)(
-  "synthesizes MP3 using %s credentials and voice",
-  (provider) =>
-    Effect.gen(function* () {
-      const layer = testLayer(
-        { dictation: null, narration: { provider, credential: "voice-key", voice: "voice-id" } },
-        (request) => {
-          expect(request.headers[provider === "elevenlabs" ? "xi-api-key" : "authorization"]).toBe(
-            provider === "elevenlabs" ? "voice-key" : "Bearer voice-key",
-          );
-          if (provider === "fish") expect(request.headers.model).toBe("s2.1-pro");
-          expect(jsonBody(request)).toMatchObject(
-            provider === "openai"
-              ? { voice: "voice-id", input: "Hello" }
-              : provider === "fish"
-                ? { text: "Hello", reference_id: "voice-id", format: "mp3" }
-                : { inputs: [{ text: "Hello", voice_id: "voice-id" }], model_id: "eleven_v4" },
-          );
-          expect(request.url).toBe(
-            provider === "openai"
-              ? "https://api.openai.com/v1/audio/speech"
-              : provider === "fish"
-                ? "https://api.fish.audio/v1/tts"
-                : "https://api.elevenlabs.io/v1/text-to-dialogue?output_format=mp3_44100_128",
-          );
-          return new Response(new Uint8Array([73, 68, 51]), {
-            headers: { "content-type": "audio/mpeg" },
-          });
-        },
+it.effect.each([
+  { provider: "openai", credential: "voice-key", voice: "voice-id" },
+  { provider: "elevenlabs", credential: "voice-key", voice: "voice-id" },
+  { provider: "fish", credential: "voice-key", voice: "voice-id", model: "s2.1-pro" },
+  { provider: "fish", credential: "voice-key", voice: "voice-id", model: "s2.1-pro-free" },
+] as const)("synthesizes MP3 using %j", (config) =>
+  Effect.gen(function* () {
+    const { provider } = config;
+    const layer = testLayer({ dictation: null, narration: config }, (request) => {
+      expect(request.headers[provider === "elevenlabs" ? "xi-api-key" : "authorization"]).toBe(
+        provider === "elevenlabs" ? "voice-key" : "Bearer voice-key",
       );
-      const result = yield* Effect.gen(function* () {
-        return yield* (yield* Speech.Speech).narrate({ text: "Hello" });
-      }).pipe(Effect.provide(layer));
-      expect(Array.from(result)).toEqual([73, 68, 51]);
-    }),
+      if (config.provider === "fish") expect(request.headers.model).toBe(config.model);
+      expect(jsonBody(request)).toMatchObject(
+        provider === "openai"
+          ? { voice: "voice-id", input: "Hello" }
+          : provider === "fish"
+            ? { text: "Hello", reference_id: "voice-id", format: "mp3" }
+            : { inputs: [{ text: "Hello", voice_id: "voice-id" }], model_id: "eleven_v4" },
+      );
+      expect(request.url).toBe(
+        provider === "openai"
+          ? "https://api.openai.com/v1/audio/speech"
+          : provider === "fish"
+            ? "https://api.fish.audio/v1/tts"
+            : "https://api.elevenlabs.io/v1/text-to-dialogue?output_format=mp3_44100_128",
+      );
+      return new Response(new Uint8Array([73, 68, 51]), {
+        headers: { "content-type": "audio/mpeg" },
+      });
+    });
+    const result = yield* Effect.gen(function* () {
+      return yield* (yield* Speech.Speech).narrate({ text: "Hello" });
+    }).pipe(Effect.provide(layer));
+    expect(Array.from(result)).toEqual([73, 68, 51]);
+  }),
 );
 
 it.effect(
@@ -244,7 +245,15 @@ it.effect.each([
 ])("rejects a non-playable Fish response %j", ({ body, contentType }) =>
   Effect.gen(function* () {
     const layer = testLayer(
-      { dictation: null, narration: { provider: "fish", credential: "key", voice: "voice-id" } },
+      {
+        dictation: null,
+        narration: {
+          provider: "fish",
+          credential: "key",
+          voice: "voice-id",
+          model: "s2.1-pro-free",
+        },
+      },
       () => new Response(body, { headers: { "content-type": contentType } }),
     );
     const error = yield* Effect.gen(function* () {
@@ -276,7 +285,9 @@ it.effect.each(
                 voice: "Ryan",
                 language: "Portuguese",
               }
-            : { provider, credential: "secret", voice: "voice-id" },
+            : provider === "fish"
+              ? { provider, credential: "secret", voice: "voice-id", model: "s2.1-pro-free" }
+              : { provider, credential: "secret", voice: "voice-id" },
       },
       () => new Response("private response details", { status }),
     );
@@ -292,11 +303,13 @@ it.effect.each(
           ? "invalid-credential"
           : status === 403
             ? "permission-denied"
-            : status === 402 || status === 429
-              ? "quota-exceeded"
-              : status === 503
-                ? "unavailable"
-                : "rejected",
+            : status === 402
+              ? "insufficient-credit"
+              : status === 429
+                ? "quota-exceeded"
+                : status === 503
+                  ? "unavailable"
+                  : "rejected",
     });
     expect(error.message).not.toContain("private");
     expect(error.message).toContain(
@@ -342,32 +355,34 @@ it.effect(
     }),
 );
 
-it.effect.each(["dictation", "elevenlabs", "fish"] as const)(
-  "validates %s before saving and preserves the previous configuration on rejection",
-  (target) =>
+it.effect.each([
+  { role: "dictation", config: { provider: "openai", credential: "new-key", language: "pt-BR" } },
+  {
+    role: "narration",
+    config: { provider: "elevenlabs", credential: "new-key", voice: "voice-id" },
+  },
+  {
+    role: "narration",
+    config: { provider: "fish", credential: "new-key", voice: "voice-id", model: "s2.1-pro" },
+  },
+  {
+    role: "narration",
+    config: { provider: "fish", credential: "new-key", voice: "voice-id", model: "s2.1-pro-free" },
+  },
+] as const)(
+  "validates %j before saving and preserves the previous configuration on rejection",
+  (config) =>
     Effect.gen(function* () {
-      const role = target === "dictation" ? "dictation" : "narration";
+      const { role } = config;
       let status = 401;
       let requests = 0;
-      const config =
-        target === "dictation"
-          ? {
-              role: "dictation" as const,
-              config: { provider: "openai" as const, credential: "new-key", language: "pt-BR" },
-            }
-          : {
-              role: "narration" as const,
-              config: {
-                provider: target,
-                credential: "new-key",
-                voice: "voice-id",
-              },
-            };
       const layer = testLayer({ dictation: null, narration: null }, (request) => {
         requests++;
-        expect(request.headers[target === "elevenlabs" ? "xi-api-key" : "authorization"]).toBe(
-          target === "elevenlabs" ? "new-key" : "Bearer new-key",
-        );
+        expect(
+          request.headers[config.config.provider === "elevenlabs" ? "xi-api-key" : "authorization"],
+        ).toBe(config.config.provider === "elevenlabs" ? "new-key" : "Bearer new-key");
+        if (config.config.provider === "fish")
+          expect(request.headers.model).toBe(config.config.model);
         return status === 200
           ? role === "dictation"
             ? Response.json({ text: "" })

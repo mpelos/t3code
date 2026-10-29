@@ -1853,7 +1853,15 @@ it.effect.each(["elevenlabs", "fish"] as const)(
         ],
         speech: {
           dictation: { provider: "openai", credential: "dictation-secret", language: "pt-BR" },
-          narration: { provider, credential: "narration-secret", voice: "voice-1" },
+          narration:
+            provider === "fish"
+              ? {
+                  provider,
+                  credential: "narration-secret",
+                  voice: "voice-1",
+                  model: "s2.1-pro-free",
+                }
+              : { provider, credential: "narration-secret", voice: "voice-1" },
         },
       });
       const raw = yield* fs.readFileString(config.settingsPath);
@@ -1874,6 +1882,13 @@ it.effect.each(["elevenlabs", "fish"] as const)(
       const kept = (yield* settings.getSettings).speech;
       assert.equal(kept.dictation?.credential, "dictation-secret");
       assert.deepInclude(kept.narration, { credential: "narration-secret" });
+      if (provider === "fish") {
+        assert.deepInclude(kept.narration, { model: "s2.1-pro-free" });
+        const stored = yield* decodeServerSettingsJson(
+          yield* fs.readFileString(config.settingsPath),
+        );
+        assert.deepInclude(stored.speech.narration, { model: "s2.1-pro-free" });
+      }
       yield* settings.updateSettings({
         speech: {
           dictation: { provider: "google", credential: "google-secret", language: "pt-BR" },

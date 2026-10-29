@@ -119,8 +119,8 @@ const make = Effect.gen(function* () {
       return yield* new SpeechError({ reason: "invalid-credential" });
     }
     if (response.status === 403) return yield* new SpeechError({ reason: "permission-denied" });
-    if (response.status === 402 || response.status === 429)
-      return yield* new SpeechError({ reason: "quota-exceeded" });
+    if (response.status === 402) return yield* new SpeechError({ reason: "insufficient-credit" });
+    if (response.status === 429) return yield* new SpeechError({ reason: "quota-exceeded" });
     if (response.status < 200 || response.status >= 300) {
       return yield* new SpeechError({
         reason: response.status >= 500 ? "unavailable" : "rejected",
@@ -268,7 +268,7 @@ const make = Effect.gen(function* () {
       case "fish":
         request = HttpClientRequest.post("https://api.fish.audio/v1/tts").pipe(
           HttpClientRequest.setHeader("authorization", `Bearer ${config.credential}`),
-          HttpClientRequest.setHeader("model", "s2.1-pro"),
+          HttpClientRequest.setHeader("model", config.model),
           HttpClientRequest.bodyJsonUnsafe({
             text,
             reference_id: config.voice,

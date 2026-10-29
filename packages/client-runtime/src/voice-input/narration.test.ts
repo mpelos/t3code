@@ -173,6 +173,7 @@ it("applies controls changed during initial loading and clears the player on nat
 it.each([
   "invalid-credential",
   "permission-denied",
+  "insufficient-credit",
   "rejected",
   "quota-exceeded",
   "unavailable",

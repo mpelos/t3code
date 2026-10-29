@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import {
   speechProviderOptions,
+  fishNarrationModelOptions,
   speechSettingsDraft,
   selectSpeechProvider,
   dictationSettingsFromDraft,
@@ -298,10 +299,33 @@ function SpeechForm({
               />
             ) : null}
             {draft.provider === "fish" ? (
-              <p className="text-xs text-muted-foreground">
-                Copy the voice ID from a voice on fish.audio. Narration uses S2.1 Pro and detects
-                the text language automatically.
-              </p>
+              <>
+                <Select
+                  items={fishNarrationModelOptions}
+                  value={draft.fishModel}
+                  disabled={disabled}
+                  onValueChange={(model: typeof draft.fishModel | null) => {
+                    if (model) changeDraft({ ...draft, fishModel: model });
+                  }}
+                >
+                  <SelectTrigger aria-label="Read aloud model">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {fishNarrationModelOptions.map(({ value, label }) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Copy the voice ID from a voice on fish.audio. Language is detected automatically.
+                  {draft.fishModel === "s2.1-pro"
+                    ? " The paid model requires API credit in Fish Audio."
+                    : " The free model is subject to Fish Audio usage limits."}
+                </p>
+              </>
             ) : null}
             {role === "dictation" && draft.provider === "google" ? (
               <p className="text-xs text-muted-foreground">

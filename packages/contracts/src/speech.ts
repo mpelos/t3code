@@ -33,6 +33,7 @@ export class SpeechError extends Schema.TaggedError<SpeechError>()(
       "not-configured",
       "invalid-credential",
       "permission-denied",
+      "insufficient-credit",
       "quota-exceeded",
       "invalid-audio",
       "invalid-text",
@@ -65,6 +66,7 @@ export class SpeechError extends Schema.TaggedError<SpeechError>()(
             "The local voice server is unavailable or still loading. Start MLX Audio on the selected Speech environment and check its server URL."
           );
         case "rejected":
+        case "insufficient-credit":
           return (
             context +
             "The local voice server rejected the request. Check the installed CustomVoice model, voice, and language in Speech settings."
@@ -105,7 +107,14 @@ export class SpeechError extends Schema.TaggedError<SpeechError>()(
       case "quota-exceeded":
         return (
           context +
-          "The provider rate limit or quota was reached. Check your balance and limits, then try again."
+          "The provider rate limit or quota was reached. Wait briefly, check your limits, and try again."
+        );
+      case "insufficient-credit":
+        return (
+          context +
+          (this.provider === "fish"
+            ? "No API credit is available for this model. Add API credit in Fish Audio or select S2.1 Pro Free in Speech settings."
+            : "The provider reported insufficient API credit. Check your API balance and billing.")
         );
       case "invalid-audio":
         return context + "The recording is empty, too large, or uses an unsupported format.";

@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import {
   speechProviderOptions,
+  fishNarrationModelOptions,
   speechSettingsDraft,
   selectSpeechProvider,
   dictationSettingsFromDraft,
@@ -175,21 +176,31 @@ function SpeechForm({
       />
     );
   }
-  function choice(name: "language" | "voice", values: readonly string[]) {
+  function choice<T extends string>(
+    name: string,
+    value: T,
+    options: readonly { readonly value: T; readonly label: string }[],
+    onSelect: (value: T) => void,
+  ) {
     return (
       <View pointerEvents={disabled ? "none" : "auto"}>
         <Menu
-          actions={values.map((value) => ({ id: value, title: value }))}
-          onPressAction={({ nativeEvent }) => changeDraft({ ...draft, [name]: nativeEvent.event })}
+          actions={options.map(({ value, label }) => ({ id: value, title: label }))}
+          onPressAction={({ nativeEvent }) => {
+            const option = options.find(({ value }) => value === nativeEvent.event);
+            if (option) onSelect(option.value);
+          }}
         >
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`${label} ${name}`}
+            accessibilityLabel={`${label} ${name.toLowerCase()}`}
             disabled={disabled}
             className="min-h-12 flex-row items-center justify-between rounded-lg border border-border-subtle px-3 py-2"
           >
-            <Text className="text-foreground-muted">{name === "voice" ? "Voice" : "Language"}</Text>
-            <Text className="text-foreground">{draft[name]}</Text>
+            <Text className="text-foreground-muted">{name}</Text>
+            <Text className="text-foreground">
+              {options.find((option) => option.value === value)?.label}
+            </Text>
           </Pressable>
         </Menu>
       </View>
@@ -252,8 +263,18 @@ function SpeechForm({
                 Run Qwen3-TTS with MLX Audio on the selected Speech environment. Audio is generated
                 there and sent to this device.
               </Text>
-              {choice("language", QWEN_NARRATION_LANGUAGES)}
-              {choice("voice", QWEN_NARRATION_VOICES)}
+              {choice(
+                "Language",
+                draft.language,
+                QWEN_NARRATION_LANGUAGES.map((value) => ({ value, label: value })),
+                (language) => changeDraft({ ...draft, language }),
+              )}
+              {choice(
+                "Voice",
+                draft.voice,
+                QWEN_NARRATION_VOICES.map((value) => ({ value, label: value })),
+                (voice) => changeDraft({ ...draft, voice }),
+              )}
             </>
           ) : null}
           {role === "dictation" || draft.provider === "google"
@@ -270,10 +291,17 @@ function SpeechForm({
               )
             : null}
           {draft.provider === "fish" ? (
-            <Text className="text-sm text-foreground-muted">
-              Copy the voice ID from a voice on fish.audio. Narration uses S2.1 Pro and detects the
-              text language automatically.
-            </Text>
+            <>
+              {choice("Model", draft.fishModel, fishNarrationModelOptions, (fishModel) =>
+                changeDraft({ ...draft, fishModel }),
+              )}
+              <Text className="text-sm text-foreground-muted">
+                Copy the voice ID from a voice on fish.audio. Language is detected automatically.
+                {draft.fishModel === "s2.1-pro"
+                  ? " The paid model requires API credit in Fish Audio."
+                  : " The free model is subject to Fish Audio usage limits."}
+              </Text>
+            </>
           ) : null}
           {role === "dictation" && draft.provider === "google" ? (
             <Text className="text-sm text-foreground-muted">Up to 60 seconds per dictation.</Text>

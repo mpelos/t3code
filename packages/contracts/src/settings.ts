@@ -913,10 +913,18 @@ export const QwenNarrationSettings = Schema.Struct({
   language: Schema.Literals(QWEN_NARRATION_LANGUAGES),
 });
 
+export const FishNarrationModel = Schema.Literals(["s2.1-pro-free", "s2.1-pro"]);
+
 export const NarrationSettings = Schema.Union([
   QwenNarrationSettings,
   Schema.Struct({
-    provider: Schema.Literals(["openai", "elevenlabs", "fish"]),
+    provider: Schema.Literal("fish"),
+    credential: SpeechCredential,
+    voice: TrimmedNonEmptyString,
+    model: FishNarrationModel.pipe(Schema.withDecodingDefaultKey(Effect.succeed("s2.1-pro"))),
+  }),
+  Schema.Struct({
+    provider: Schema.Literals(["openai", "elevenlabs"]),
     credential: SpeechCredential,
     voice: TrimmedNonEmptyString,
   }),

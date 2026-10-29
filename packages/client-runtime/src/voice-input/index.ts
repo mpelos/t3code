@@ -21,6 +21,7 @@ export {
 export { NarrationController, type NarrationPlaybackOptions } from "./narration.ts";
 export {
   speechProviderOptions,
+  fishNarrationModelOptions,
   speechSettingsDraft,
   selectSpeechProvider,
   dictationSettingsFromDraft,
