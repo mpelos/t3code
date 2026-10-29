@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
+  DeviceHostId,
   ModelSelection,
   ProjectId,
   ProjectScript,
@@ -1839,6 +1840,17 @@ it.effect.each(["elevenlabs", "fish"] as const)(
       const fs = yield* FileSystem.FileSystem;
       const secrets = yield* ServerSecretStore.ServerSecretStore;
       const saved = yield* settings.updateSettings({
+        simlockDeviceHosts: [
+          {
+            kind: "simlock",
+            id: DeviceHostId.make("simlock-fixture"),
+            label: "Simlock",
+            gatewayUrl: "https://simlock.test",
+            agentToken: "device-secret",
+            maxLeases: 2,
+            maxLeaseMinutes: 60,
+          },
+        ],
         speech: {
           dictation: { provider: "openai", credential: "dictation-secret", language: "pt-BR" },
           narration: { provider, credential: "narration-secret", voice: "voice-1" },
@@ -1847,6 +1859,11 @@ it.effect.each(["elevenlabs", "fish"] as const)(
       const raw = yield* fs.readFileString(config.settingsPath);
       assert.notInclude(raw, "dictation-secret");
       assert.notInclude(raw, "narration-secret");
+      assert.notInclude(raw, "device-secret");
+      assert.notEqual(
+        ServerSettingsModule.redactServerSettingsForClient(saved).simlockDeviceHosts[0]?.agentToken,
+        "device-secret",
+      );
       const redacted = ServerSettingsModule.redactServerSettingsForClient(saved).speech;
       assert.notEqual(redacted.dictation?.credential, "dictation-secret");
       if (redacted.narration?.provider !== provider)
@@ -1882,6 +1899,10 @@ it.effect.each(["elevenlabs", "fish"] as const)(
       yield* settings.updateSettings({ speech: { narration: null } });
       assert.isTrue(Option.isNone(yield* secrets.get(`speech-narration-${provider}`)));
       assert.equal((yield* settings.getSettings).speech.dictation?.credential, "google-secret");
+      assert.equal(
+        (yield* settings.getSettings).simlockDeviceHosts[0]?.agentToken,
+        "device-secret",
+      );
     }).pipe(
       Effect.provide(layerServerSettingsWithSecrets().pipe(Layer.provideMerge(NodeServices.layer))),
     ),
