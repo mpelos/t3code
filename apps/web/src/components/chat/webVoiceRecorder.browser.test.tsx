@@ -3,9 +3,32 @@ import { userEvent } from "vite-plus/test/browser";
 import { render } from "../../../test/render";
 import { WebVoiceRecorder } from "./webVoiceRecorder";
 
-it.each([0, 1])(
-  "records input channel %s in the same mono signal shown by the meter",
-  async (channel) => {
+it.each([true, false])(
+  "waits for macOS microphone permission (%s) before capture",
+  async (granted) => {
+    using resources = new DisposableStack();
+    const decision = Promise.withResolvers<boolean>();
+    vi.stubGlobal("desktopBridge", {
+      getClientPlatform: () => "darwin",
+      requestMicrophoneAccess: () => decision.promise,
+    });
+    resources.defer(() => vi.unstubAllGlobals());
+    using capture = vi
+      .spyOn(navigator.mediaDevices, "getUserMedia")
+      .mockRejectedValue(
+        new Error("Native permission must be resolved before opening the microphone"),
+      );
+    const recorder = new WebVoiceRecorder(() => {});
+    const permission = recorder.requestPermission();
+    decision.resolve(granted);
+    expect(await permission).toEqual({ granted, canAskAgain: granted });
+    expect(capture).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["left", "right", "opposite-phase", "suspended-meter", "silent"] as const)(
+  "captures %s input without submitting silent audio",
+  async (input) => {
     await using resources = new AsyncDisposableStack();
     const sourceContext = new AudioContext();
     resources.defer(() => sourceContext.close());
@@ -15,9 +38,15 @@ it.each([0, 1])(
     const source = sourceContext.createBufferSource();
     const sampleRate = sourceContext.sampleRate;
     source.buffer = sourceContext.createBuffer(2, sampleRate / 4, sampleRate);
-    const samples = source.buffer.getChannelData(channel);
-    for (let index = 0; index < samples.length; index++)
-      samples[index] = Math.sin((index * 2 * Math.PI * 440) / sampleRate);
+    const samples = source.buffer.getChannelData(input === "right" ? 1 : 0);
+    if (input !== "silent") {
+      for (let index = 0; index < samples.length; index++)
+        samples[index] = Math.sin((index * 2 * Math.PI * 440) / sampleRate);
+    }
+    if (input === "opposite-phase") {
+      const right = source.buffer.getChannelData(1);
+      for (let index = 0; index < right.length; index++) right[index] = -(samples[index] ?? 0);
+    }
     const sourceEnded = Promise.withResolvers<void>();
     source.onended = () => sourceEnded.resolve();
     const destination = sourceContext.createMediaStreamDestination();
@@ -43,18 +72,30 @@ it.each([0, 1])(
     await recorder.requestPermission();
     await recorder.prepareToRecordAsync();
     expect(meterContext.state).toBe("running");
+    if (input === "suspended-meter") await meterContext.suspend();
     recorder.record({ forDuration: 300 });
     source.start();
-    await vi.waitFor(() => expect(recorder.levels().some((level) => level > 0)).toBe(true));
+    if (input !== "silent" && input !== "suspended-meter") {
+      await vi.waitFor(() => expect(recorder.levels().some((level) => level > 0)).toBe(true));
+    }
     await sourceEnded.promise;
     await recorder.stop();
     await recorder.release();
     expect(meterContext.state).toBe("closed");
-    const recording = recorder.uri ? recorder.read(recorder.uri) : undefined;
+    if (input === "silent") {
+      await expect(async () => recorder.read(recorder.uri ?? "")).rejects.toThrow(
+        "No audio was captured",
+      );
+      return;
+    }
+    const recording = recorder.uri ? await recorder.read(recorder.uri) : undefined;
     expect(recording).toBeDefined();
     if (!recording) throw new Error("Recording was not saved");
     const audio = await sourceContext.decodeAudioData(await recording.blob.arrayBuffer());
-    expect(audio.numberOfChannels).toBe(1);
-    expect(audio.getChannelData(0).some((sample) => Math.abs(sample) > 0.1)).toBe(true);
+    expect(
+      Array.from({ length: audio.numberOfChannels }, (_, channel) =>
+        audio.getChannelData(channel).some((sample) => Math.abs(sample) > 0.1),
+      ).some(Boolean),
+    ).toBe(true);
   },
 );

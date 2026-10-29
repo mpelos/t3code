@@ -1,5 +1,6 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import { toastManager } from "../ui/toast";
 import { useAtomValue } from "@effect/atom-react";
 import {
   VoiceInputController,
@@ -45,7 +46,7 @@ export function useWebDictation(input: {
             maxRecordingSeconds: config.provider === "google" ? 60 : 300,
             transcribe: async (uri: string, { signal }: { readonly signal: AbortSignal }) => {
               throwIfVoiceTranscriptionAborted(signal);
-              const recording = read(uri);
+              const recording = await read(uri);
               if (!recording) throw new Error("The recording is no longer available.");
               const result = await transcribe({
                 environmentId: speechEnvironmentId,
@@ -94,6 +95,20 @@ export function useWebDictation(input: {
   }, [controller, input.ownerKey, speechEnvironmentId, config, allowed, readDraft]);
   return {
     state,
+    canOpenMicrophoneSettings: window.desktopBridge?.getClientPlatform() === "darwin",
+    openMicrophoneSettings: async () => {
+      controller.cancel();
+      try {
+        const opened = await window.desktopBridge?.openSystemSettings("microphone");
+        if (!opened) throw new Error("Could not open microphone settings.");
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Could not open microphone settings",
+          description: error instanceof Error ? error.message : "Open System Settings manually.",
+        });
+      }
+    },
     openSettings: () => {
       controller.cancel();
       void navigate({

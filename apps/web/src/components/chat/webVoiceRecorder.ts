@@ -1,5 +1,9 @@
 import { randomUUID } from "~/lib/utils";
-import type { VoiceRecorder, VoiceRecorderStatus } from "@t3tools/client-runtime/voice-input";
+import {
+  voiceTranscriptionFailure,
+  type VoiceRecorder,
+  type VoiceRecorderStatus,
+} from "@t3tools/client-runtime/voice-input";
 import type { SpeechAudioFormat } from "@t3tools/contracts";
 
 const FORMATS: ReadonlyArray<{ readonly mimeType: string; readonly format: SpeechAudioFormat }> = [
@@ -11,13 +15,12 @@ const FORMATS: ReadonlyArray<{ readonly mimeType: string; readonly format: Speec
 export class WebVoiceRecorder implements VoiceRecorder {
   uri: string | null = null;
   private stream: MediaStream | null = null;
-  private recordingStream: MediaStream | null = null;
   private recorder: MediaRecorder | null = null;
   private recording: { readonly promise: Promise<void>; readonly resolve: () => void } | null =
     null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private context: AudioContext | null = null;
-  private analyser: AnalyserNode | null = null;
+  private analysers: AnalyserNode[] = [];
   private readonly recordings = new Map<
     string,
     { readonly blob: Blob; readonly format: SpeechAudioFormat }
@@ -29,6 +32,11 @@ export class WebVoiceRecorder implements VoiceRecorder {
   }
 
   async requestPermission() {
+    const desktop = window.desktopBridge;
+    if (desktop?.getClientPlatform() === "darwin") {
+      const granted = await desktop.requestMicrophoneAccess();
+      return { granted, canAskAgain: granted };
+    }
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     for (const track of stream.getTracks()) track.stop();
     return { granted: true, canAskAgain: true };
@@ -38,22 +46,25 @@ export class WebVoiceRecorder implements VoiceRecorder {
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const format = FORMATS.find(({ mimeType }) => MediaRecorder.isTypeSupported(mimeType));
     if (!format) throw new Error("Audio recording is not supported in this browser.");
-    this.context = new AudioContext();
-    this.analyser = this.context.createAnalyser();
-    this.analyser.fftSize = 64;
-    const output = this.context.createMediaStreamDestination();
-    output.channelCount = 1;
-    this.recordingStream = output.stream;
-    this.context.createMediaStreamSource(this.stream).connect(output);
-    // Meter the mono mix sent to transcription, including microphones with voice on one channel.
-    this.context.createMediaStreamSource(this.recordingStream).connect(this.analyser);
+    const context = new AudioContext();
+    this.context = context;
+    const channels = this.stream.getAudioTracks()[0]?.getSettings().channelCount ?? 2;
+    const splitter = context.createChannelSplitter(channels);
+    context.createMediaStreamSource(this.stream).connect(splitter);
+    this.analysers = Array.from({ length: channels }, (_, channel) => {
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 64;
+      splitter.connect(analyser, channel);
+      return analyser;
+    });
     await this.context.resume();
     this.uri = randomUUID();
     const uri = this.uri;
     const chunks: Blob[] = [];
     const recording = Promise.withResolvers<void>();
     this.recording = recording;
-    this.recorder = new MediaRecorder(this.recordingStream, { mimeType: format.mimeType });
+    // Capture the system input directly; metering must not alter or drive the recorded signal.
+    this.recorder = new MediaRecorder(this.stream, { mimeType: format.mimeType });
     this.recorder.addEventListener("dataavailable", ({ data }) => {
       if (data.size) chunks.push(data);
     });
@@ -116,23 +127,38 @@ export class WebVoiceRecorder implements VoiceRecorder {
 
   async release(): Promise<void> {
     for (const track of this.stream?.getTracks() ?? []) track.stop();
-    for (const track of this.recordingStream?.getTracks() ?? []) track.stop();
     this.stream = null;
-    this.recordingStream = null;
     const context = this.context;
     this.context = null;
-    this.analyser = null;
+    this.analysers = [];
     if (context) await context.close();
   }
 
   levels(): Uint8Array {
     const values = new Uint8Array(32);
-    this.analyser?.getByteFrequencyData(values);
+    const channel = new Uint8Array(32);
+    for (const analyser of this.analysers) {
+      analyser.getByteFrequencyData(channel);
+      for (let index = 0; index < values.length; index++)
+        values[index] = Math.max(values[index] ?? 0, channel[index] ?? 0);
+    }
     return values;
   }
 
-  read(uri: string) {
-    return this.recordings.get(uri);
+  async read(uri: string) {
+    const recording = this.recordings.get(uri);
+    if (!recording) return undefined;
+    const decoder = new OfflineAudioContext(1, 1, 48000);
+    const audio = await decoder.decodeAudioData(await recording.blob.arrayBuffer());
+    for (let channel = 0; channel < audio.numberOfChannels; channel++) {
+      if (audio.getChannelData(channel).some((sample) => Math.abs(sample) > 0.0001))
+        return recording;
+    }
+    throw voiceTranscriptionFailure(
+      new Error(
+        "No audio was captured. Check the default input and microphone access for this app on this device, then try again.",
+      ),
+    );
   }
   delete(uri: string): void {
     this.recordings.delete(uri);

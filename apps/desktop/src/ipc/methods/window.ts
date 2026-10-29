@@ -305,7 +305,7 @@ export const openSystemSettings = DesktopIpc.makeIpcMethod({
     if (environment.platform !== "darwin") return false;
     const owner = Electron.BrowserWindow.getFocusedWindow();
     const opened = yield* shell.openSystemSettings(pane);
-    if (opened && environment.isPackaged) {
+    if (opened && environment.isPackaged && pane === "full-disk-access") {
       const permissions = yield* MacPermissions.MacPermissions;
       const isGranted = yield* safariPermissionCheck;
       yield* permissions.showHelper(pane, owner, isGranted);
@@ -418,10 +418,24 @@ export const checkSystemPermission = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.CHECK_SYSTEM_PERMISSION_CHANNEL,
   payload: SystemSettingsPaneSchema,
   result: Schema.Boolean,
-  handler: Effect.fn("desktop.ipc.window.checkSystemPermission")(function* () {
+  handler: Effect.fn("desktop.ipc.window.checkSystemPermission")(function* (pane) {
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     if (environment.platform !== "darwin") return false;
+    if (pane === "microphone") {
+      const permissions = yield* MacPermissions.MacPermissions;
+      return yield* permissions.checkMicrophoneAccess;
+    }
     const check = yield* safariPermissionCheck;
     return yield* Effect.promise(check);
+  }),
+});
+
+export const requestMicrophoneAccess = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.REQUEST_MICROPHONE_ACCESS_CHANNEL,
+  payload: Schema.Undefined,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.window.requestMicrophoneAccess")(function* () {
+    const permissions = yield* MacPermissions.MacPermissions;
+    return yield* permissions.requestMicrophoneAccess();
   }),
 });

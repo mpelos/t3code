@@ -58,6 +58,11 @@ export function DictationControl({
           Fix credentials
         </Button>
       ) : null}
+      {voice.state.errorAction === "settings" && voice.canOpenMicrophoneSettings ? (
+        <Button type="button" variant="ghost" size="sm" onClick={voice.openMicrophoneSettings}>
+          Open microphone settings
+        </Button>
+      ) : null}
       {recording ? <RecordingWaveform recorder={voice.recorder} /> : null}
       {!fixCredentials ? (
         <Tooltip>

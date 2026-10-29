@@ -1,4 +1,5 @@
 import * as Context from "effect/Context";
+import type * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -10,6 +11,8 @@ import type { MacPermission } from "./MacPermission.ts";
 export class MacPermissions extends Context.Service<
   MacPermissions,
   {
+    readonly checkMicrophoneAccess: Effect.Effect<boolean>;
+    readonly requestMicrophoneAccess: () => Effect.Effect<boolean, Cause.UnknownError>;
     readonly showHelper: (
       permission: MacPermission,
       owner: Electron.BrowserWindow | null,
@@ -26,6 +29,20 @@ export const layer = Layer.effect(
     const helper = new MacPermissionHelper();
     yield* Effect.addFinalizer(() => Effect.sync(() => helper.close()));
     return MacPermissions.of({
+      checkMicrophoneAccess: Effect.sync(
+        () =>
+          environment.platform !== "darwin" ||
+          Electron.systemPreferences.getMediaAccessStatus("microphone") === "granted",
+      ),
+      requestMicrophoneAccess: Effect.fn("MacPermissions.requestMicrophoneAccess")(function* () {
+        if (environment.platform !== "darwin") return true;
+        const status = Electron.systemPreferences.getMediaAccessStatus("microphone");
+        if (status === "granted") return true;
+        if (status !== "not-determined") return false;
+        return yield* Effect.tryPromise(() =>
+          Electron.systemPreferences.askForMediaAccess("microphone"),
+        );
+      }),
       showHelper: Effect.fn("MacPermissions.showHelper")(function* (permission, owner, isGranted) {
         if (environment.platform !== "darwin" || !environment.isPackaged) return;
         yield* Effect.tryPromise(() =>

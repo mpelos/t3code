@@ -1008,7 +1008,7 @@ export const DesktopPreviewRecordingSaveInputSchema = Schema.Struct({
   data: Schema.Uint8Array,
 });
 
-export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
+export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access", "microphone"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
 export interface DesktopBridge {
@@ -1096,6 +1096,7 @@ export interface DesktopBridge {
   openExternal: (url: string) => Promise<boolean>;
   openSystemSettings: (pane: SystemSettingsPane) => Promise<boolean>;
   checkSystemPermission: (pane: SystemSettingsPane) => Promise<boolean>;
+  requestMicrophoneAccess: () => Promise<boolean>;
   probeRemoteEditors: () => Promise<readonly EditorId[]>;
   pasteAsText: () => Promise<void>;
   onMenuAction: (listener: (action: string) => void) => () => void;
