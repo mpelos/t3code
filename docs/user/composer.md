@@ -234,7 +234,10 @@ Swipe a device left to forget it.
 Use **Read aloud** beside a completed response's actions to hear an AI-generated
 voice. Press it again to stop. Long responses play in consecutive segments; code
 blocks are omitted from narration. Each audio action appears only when its
-respective provider is configured.
+respective provider is configured. The player's waveform grows as more audio is
+prepared. Click or drag it to seek within the prepared audio; playback pauses while
+dragging and resumes on release if it was playing. Playback speeds are 1x, 1.25x,
+1.5x, 1.75x, and 2x.
 
 Recordings and narration text are sent to the selected external provider and use
 its billing and data policies. T3 Code deletes temporary recordings after

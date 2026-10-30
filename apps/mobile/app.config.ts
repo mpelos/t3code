@@ -375,6 +375,15 @@ const config: ExpoConfig = {
       },
     ],
     [
+      "react-native-audio-api",
+      {
+        disableFFmpeg: true,
+        iosBackgroundMode: false,
+        androidPermissions: [],
+        androidForegroundService: false,
+      },
+    ],
+    [
       "expo-camera",
       {
         cameraPermission: "Allow T3 Code to access your camera so you can scan pairing QR codes.",

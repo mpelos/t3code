@@ -230,6 +230,15 @@
   ],
   "packageOverrides": [
     {
+      "name": "react-native-audio-api",
+      "version": "0.13.6",
+      "sourceUrl": "https://github.com/software-mansion/react-native-audio-api/tree/0.13.6",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2024 Software Mansion"]
+      }
+    },
+    {
       "name": "entities",
       "version": "8.1.0",
       "license": "BSD-2-Clause",

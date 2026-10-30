@@ -119,6 +119,7 @@
     "react": "catalog:",
     "react-dom": "catalog:",
     "react-native": "0.88.0",
+    "react-native-audio-api": "~0.13.6",
     "react-native-blob-util": "0.25.1",
     "react-native-enriched-markdown": "file:deps/react-native-enriched-markdown-1.2.0-t3.16-29ddd424.tgz",
     "react-native-gesture-handler": "~3.3.0",

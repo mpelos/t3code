@@ -13,6 +13,8 @@ import { cn } from "../../lib/cn";
 import { useToolbarLayout } from "../../components/ui/useToolbarLayout";
 import { rootNavigationRef, whenRootNavigationReady } from "../../lib/rootNavigation";
 import { openSettings } from "../settings/settings-navigation";
+import { formatNarrationTime } from "@t3tools/client-runtime/voice-input";
+import { NarrationWaveform } from "./NarrationWaveform";
 
 export function NarrationPlayer() {
   const controller = useAtomValue(narrationAtom);
@@ -25,7 +27,7 @@ export function NarrationPlayer() {
       ? getDefaultHeaderHeight(dimensions, false, insets.top)
       : toolbar.paddingTop + toolbar.height + toolbar.paddingBottom;
   if (state.phase === "idle" && !state.error) return null;
-  const elapsed = `${Math.floor(state.elapsedSeconds / 60)}:${String(state.elapsedSeconds % 60).padStart(2, "0")}`;
+  const elapsed = formatNarrationTime(state.elapsedSeconds);
   const player = (
     <View pointerEvents="box-none" className="absolute inset-0">
       <View
@@ -69,18 +71,16 @@ export function NarrationPlayer() {
                 accessibilityLabel={state.paused ? "Resume narration" : "Pause narration"}
                 onPress={() => controller.togglePaused()}
               />
-              <View className="min-w-0 flex-1 flex-row items-center gap-2">
-                {state.phase === "loading" ? (
+              {state.durationSeconds > 0 ? (
+                <NarrationWaveform controller={controller} state={state} />
+              ) : (
+                <View className="min-w-0 flex-1 flex-row items-center gap-2">
                   <AppActivityIndicator colorClassName="accent-foreground-muted" />
-                ) : null}
-                <AppText numberOfLines={1} className="shrink text-sm text-foreground">
-                  {state.paused
-                    ? "Paused"
-                    : state.phase === "loading"
-                      ? "Preparing audio…"
-                      : "Read aloud"}
-                </AppText>
-              </View>
+                  <AppText numberOfLines={1} className="shrink text-sm text-foreground">
+                    Preparing audio…
+                  </AppText>
+                </View>
+              )}
               <AppText
                 className="text-xs tabular-nums text-foreground-muted"
                 accessibilityLabel="Playback time"

@@ -18,7 +18,16 @@ export {
   type VoiceTranscriptionOptions,
 } from "./transcription.ts";
 
-export { NarrationController, type NarrationPlaybackOptions } from "./narration.ts";
+export {
+  NarrationController,
+  type NarrationPlaybackOptions,
+  type NarrationState,
+} from "./narration.ts";
+export {
+  inspectNarrationAudio,
+  formatNarrationTime,
+  narrationWaveformPath,
+} from "./narrationWaveform.ts";
 export {
   speechProviderOptions,
   fishNarrationModelOptions,

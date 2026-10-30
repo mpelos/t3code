@@ -5,6 +5,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 import { render } from "../../../test/render";
 import "../../index.css";
+import narrationSample from "../../assets/notification-completion.mp3?url";
 
 const state = vi.hoisted(() => ({
   selected: "speech-host",
@@ -205,6 +206,7 @@ it("hides both controls when the chosen Speech host is unconfigured, even if ano
 it.each([
   { ending: "completion", source: "speech-host" },
   { ending: "close", source: "speech-host" },
+  { ending: "seek", source: "speech-host" },
   { ending: "environment change", source: "speech-host" },
   { ending: "completion", source: "qwen-host" },
 ])("keeps the player when its message unmounts and cleans up on %j", async ({ ending, source }) => {
@@ -224,6 +226,12 @@ it.each([
     </>,
   );
   using play = vi.spyOn(audio, "play").mockResolvedValue();
+  using _metadata = vi.spyOn(audio, "readyState", "get").mockReturnValue(4);
+  using _decode = vi
+    .spyOn(OfflineAudioContext.prototype, "decodeAudioData")
+    .mockResolvedValue(
+      new AudioBuffer({ length: 8000 * 120, sampleRate: 8000, numberOfChannels: 1 }),
+    );
   using pause = vi.spyOn(audio, "pause").mockImplementation(() => {});
   using load = vi.spyOn(audio, "load").mockImplementation(() => {});
   using _audio = vi.spyOn(window, "Audio").mockImplementation(function () {
@@ -249,26 +257,82 @@ it.each([
   await expect
     .element(screen.getByRole("button", { name: "Resume narration" }))
     .toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "Playback speed 1x" }));
-  expect(audio.playbackRate).toBe(1.5);
-  await userEvent.click(screen.getByRole("button", { name: "Playback speed 1.5x" }));
-  expect(audio.playbackRate).toBe(2);
-  await userEvent.click(screen.getByRole("button", { name: "Playback speed 2x" }));
-  expect(audio.playbackRate).toBe(1);
+  let rate = 1;
+  for (const next of [1.25, 1.5, 1.75, 2, 1]) {
+    await userEvent.click(screen.getByRole("button", { name: `Playback speed ${rate}x` }));
+    expect(audio.playbackRate).toBe(next);
+    rate = next;
+  }
   await userEvent.click(screen.getByRole("button", { name: "Resume narration" }));
   expect(play).toHaveBeenCalledTimes(2);
   audio.currentTime = 65;
   audio.dispatchEvent(new Event("timeupdate"));
   await expect.element(screen.getByLabelText("Playback time")).toHaveTextContent("1:05");
+  if (ending === "seek") {
+    using _capture = vi
+      .spyOn(HTMLElement.prototype, "setPointerCapture")
+      .mockImplementation(() => {});
+    const slider = screen.getByRole("slider", { name: "Narration position" }).element();
+    const bounds = slider.getBoundingClientRect();
+    const at = (seconds: number) => ({
+      bubbles: true,
+      pointerId: 1,
+      buttons: 1,
+      clientX: bounds.left + (bounds.width * seconds) / 120,
+    });
+    slider.dispatchEvent(new PointerEvent("pointerdown", at(65)));
+    slider.dispatchEvent(new PointerEvent("pointermove", at(30)));
+    await expect.element(screen.getByLabelText("Playback time")).toHaveTextContent("0:30");
+    expect(audio.currentTime).toBe(65);
+    expect(play).toHaveBeenCalledTimes(2);
+    await expect
+      .element(screen.getByRole("button", { name: "Resume narration" }))
+      .toBeInTheDocument();
+    slider.dispatchEvent(new PointerEvent("pointerup", at(30)));
+    await vi.waitFor(() => expect(play).toHaveBeenCalledTimes(3));
+    expect(audio.currentTime).toBe(30);
+    expect(state.synthesize).toHaveBeenCalledTimes(1);
+  }
   if (ending === "completion") audio.dispatchEvent(new Event("ended"));
-  else if (ending === "close")
+  else if (ending === "close" || ending === "seek")
     await userEvent.click(screen.getByRole("button", { name: "Close narration" }));
   else await selectSpeechEnvironment(EnvironmentId.make("empty-host"));
   await expect
     .element(screen.getByRole("region", { name: "Read aloud player" }))
     .not.toBeInTheDocument();
-  expect(revoke).toHaveBeenCalledTimes(1);
-  expect(load).toHaveBeenCalledTimes(1);
+  expect(revoke).toHaveBeenCalledTimes(ending === "seek" ? 2 : 1);
+  expect(load).toHaveBeenCalledTimes(ending === "seek" ? 2 : 1);
+});
+
+it("decodes a real MP3 into a seekable waveform and supports keyboard seeking", async () => {
+  setup();
+  const audio = new Uint8Array(await (await fetch(narrationSample)).arrayBuffer());
+  state.synthesize.mockResolvedValue(AsyncResult.success(audio));
+  await using screen = await render(
+    <>
+      <NarrationPlayer />
+      <ReadAloudButton
+        environmentId={EnvironmentId.make("agent-host")}
+        owner="reply"
+        text="Hello"
+        streaming={false}
+      />
+    </>,
+  );
+  using play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+  await userEvent.click(screen.getByRole("button", { name: "Read aloud", exact: true }));
+  const position = screen.getByRole("slider", { name: "Narration position" });
+  await expect.element(position).toBeInTheDocument();
+  const duration = Number(position.element().getAttribute("max"));
+  expect(duration).toBeGreaterThan(0.5);
+  expect(duration).toBeLessThan(1);
+  await vi.waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+  position.element().focus();
+  await userEvent.keyboard("{ArrowRight}");
+  await vi.waitFor(() => expect(play).toHaveBeenCalledTimes(2));
+  expect(Number(position.element().getAttribute("value"))).toBeGreaterThan(0);
+  expect(state.synthesize).toHaveBeenCalledTimes(1);
+  await userEvent.click(screen.getByRole("button", { name: "Close narration" }));
 });
 
 it("closes and cancels narration while audio is still being prepared", async () => {

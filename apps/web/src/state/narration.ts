@@ -2,6 +2,7 @@ import { Atom } from "effect/reactivity";
 import { isNarrationConfigured, type EnvironmentId } from "@t3tools/contracts";
 import {
   NarrationController,
+  inspectNarrationAudio,
   type NarrationPlaybackOptions,
 } from "@t3tools/client-runtime/voice-input";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
@@ -13,7 +14,10 @@ function playNarration(bytes: Uint8Array, signal: AbortSignal, options: Narratio
     const player = new Audio(url);
     let finished = false;
     let paused = true;
-    const progress = () => options.onProgress(player.currentTime);
+    let ready = false;
+    const progress = () => {
+      if (ready) options.onProgress(player.currentTime);
+    };
     const finish = (error?: Error) => {
       if (finished) return;
       finished = true;
@@ -21,6 +25,8 @@ function playNarration(bytes: Uint8Array, signal: AbortSignal, options: Narratio
       player.onended = null;
       player.onerror = null;
       player.ontimeupdate = null;
+      player.onloadedmetadata = null;
+      player.onseeked = null;
       player.pause();
       player.removeAttribute("src");
       player.load();
@@ -40,24 +46,37 @@ function playNarration(bytes: Uint8Array, signal: AbortSignal, options: Narratio
     };
     player.onerror = () => finish(new Error("Could not play the generated audio."));
     player.ontimeupdate = progress;
-    options.onReady({
-      setRate: (rate) => {
-        player.playbackRate = rate;
-      },
-      setPaused: (next) => {
-        paused = next;
-        if (paused) player.pause();
-        else
-          void player.play().catch((error: unknown) => {
-            if (
-              !paused &&
-              !signal.aborted &&
-              !(error instanceof DOMException && error.name === "AbortError")
-            )
-              finish(new Error("Audio playback was blocked. Try reading the response again."));
-          });
-      },
-    });
+    const readyToPlay = () => {
+      if (finished || ready) return;
+      player.onseeked = null;
+      ready = true;
+      options.onReady({
+        setRate: (rate) => {
+          player.playbackRate = rate;
+        },
+        setPaused: (next) => {
+          paused = next;
+          if (paused) player.pause();
+          else
+            void player.play().catch((error: unknown) => {
+              if (
+                !paused &&
+                !signal.aborted &&
+                !(error instanceof DOMException && error.name === "AbortError")
+              )
+                finish(new Error("Audio playback was blocked. Try reading the response again."));
+            });
+        },
+      });
+    };
+    const initialize = () => {
+      if (finished || ready) return;
+      player.onseeked = readyToPlay;
+      player.currentTime = options.startSeconds;
+      if (!player.seeking) readyToPlay();
+    };
+    player.onloadedmetadata = initialize;
+    if (player.readyState >= 1) initialize();
   });
 }
 
@@ -71,6 +90,10 @@ export const narrationAtom = Atom.make((get) => {
       });
       if (result._tag === "Failure") throw squashAtomCommandFailure(result);
       return result.value;
+    },
+    inspect: async (bytes) => {
+      const decoder = new OfflineAudioContext(1, 1, 8000);
+      return inspectNarrationAudio(await decoder.decodeAudioData(Uint8Array.from(bytes).buffer));
     },
     play: playNarration,
   });

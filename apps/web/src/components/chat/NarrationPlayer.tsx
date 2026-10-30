@@ -1,17 +1,19 @@
 import { useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
 import { useSyncExternalStore } from "react";
-import { PauseIcon, PlayIcon, Volume2Icon, XIcon } from "lucide-react";
+import { PauseIcon, PlayIcon, XIcon } from "lucide-react";
+import { formatNarrationTime } from "@t3tools/client-runtime/voice-input";
 import { narrationAtom } from "~/state/narration";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
+import { NarrationWaveform } from "./NarrationWaveform";
 
 export function NarrationPlayer() {
   const controller = useAtomValue(narrationAtom);
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   if (state.phase === "idle" && !state.error) return null;
-  const elapsed = `${Math.floor(state.elapsedSeconds / 60)}:${String(state.elapsedSeconds % 60).padStart(2, "0")}`;
+  const elapsed = formatNarrationTime(state.elapsedSeconds);
   return (
     <div className="pointer-events-none absolute inset-x-0 top-3 z-30 flex justify-center px-4">
       <div
@@ -48,20 +50,14 @@ export function NarrationPlayer() {
             >
               {state.paused ? <PlayIcon /> : <PauseIcon />}
             </Button>
-            <div className="flex min-w-0 flex-1 items-center gap-2 text-sm">
-              {state.phase === "loading" ? (
+            {state.durationSeconds > 0 ? (
+              <NarrationWaveform controller={controller} state={state} />
+            ) : (
+              <div className="flex min-w-0 flex-1 items-center gap-2 text-sm">
                 <Spinner />
-              ) : (
-                <Volume2Icon className="size-4 shrink-0 text-muted-foreground" />
-              )}
-              <span className="truncate">
-                {state.paused
-                  ? "Paused"
-                  : state.phase === "loading"
-                    ? "Preparing audio…"
-                    : "Read aloud"}
-              </span>
-            </div>
+                <span className="truncate">Preparing audio…</span>
+              </div>
+            )}
             <span className="text-xs tabular-nums text-muted-foreground" aria-label="Playback time">
               {elapsed}
             </span>
