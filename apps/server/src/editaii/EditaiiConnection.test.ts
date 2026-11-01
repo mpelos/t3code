@@ -3,6 +3,7 @@ import * as NodeHttp from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
@@ -661,6 +662,57 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       yield* Deferred.await(ended);
       expect((yield* h.connection.state).status).toBe("disconnected");
       expect(new TextDecoder().decode(h.saved())).not.toContain("test-secret");
+    }),
+  );
+
+  it.effect("cancellation while the listener is binding leaves no listener behind", () =>
+    Effect.gen(function* () {
+      const h = yield* harness();
+      yield* h.connection.configure({ origin: ORIGIN });
+      const bind = NodeHttp.Server.prototype.listen;
+      const bound: { server: NodeHttp.Server; reported: Promise<void> }[] = [];
+      let starting: Fiber.Fiber<void, unknown> | undefined;
+      // The cancellation lands in the same tick as listen(), before Node reports the bind.
+      const spy = vi.spyOn(NodeHttp.Server.prototype, "listen").mockImplementation(function (
+        this: NodeHttp.Server,
+        ...args: Parameters<NodeHttp.Server["listen"]>
+      ) {
+        const server = bind.apply(this, args);
+        // Node always reports a bind it completes, even one nobody waits for any more.
+        bound.push({
+          server: this,
+          reported: new Promise((resolve) => this.once("listening", () => resolve())),
+        });
+        starting?.interruptUnsafe();
+        return server;
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()));
+      starting = yield* h.connection.startPairing({ machineName: "Office" }).pipe(Effect.forkChild);
+      expect(Exit.hasInterrupts(yield* Fiber.await(starting))).toBe(true);
+      const [attempt] = bound;
+      if (!attempt) return yield* Effect.die("the listener never started binding");
+      yield* Effect.promise(() => attempt.reported);
+      expect(bound).toHaveLength(1);
+      expect(attempt.server.listening).toBe(false);
+      expect(yield* h.connection.state).toMatchObject({ status: "disconnected", canReopen: false });
+      expect(h.urls).toHaveLength(0);
+    }),
+  );
+
+  it.effect("a cancelled disconnect still completes, so no closed attempt looks usable", () =>
+    Effect.gen(function* () {
+      const h = yield* harness();
+      const url = yield* h.begin();
+      // Runs until the listener is closing, then is cancelled there.
+      const disconnecting = yield* h.connection
+        .disconnect()
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Fiber.interrupt(disconnecting);
+      expect(yield* h.connection.state).toMatchObject({ status: "disconnected", canReopen: false });
+      expect(yield* decodeBody(new TextDecoder().decode(h.saved()))).toMatchObject({
+        phase: "disconnected",
+      });
+      expect((yield* callback(url).pipe(Effect.result))._tag).toBe("Failure");
     }),
   );
 

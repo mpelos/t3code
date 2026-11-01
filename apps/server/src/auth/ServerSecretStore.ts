@@ -207,8 +207,9 @@ export const make = Effect.gen(function* () {
             }),
           );
           yield* fileSystem.chmod(tempPath, 0o600);
+          // The rename publishes the finished file, mode included, and is the last step: a failure
+          // from `set` always means the previous value still stands.
           yield* fileSystem.rename(tempPath, secretPath);
-          yield* fileSystem.chmod(secretPath, 0o600);
         }).pipe(
           Effect.catch((cause) =>
             fileSystem.remove(tempPath).pipe(

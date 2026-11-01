@@ -505,7 +505,9 @@ const make = Effect.gen(function* () {
       (scope) =>
         Effect.gen(function* () {
           const listenerScope = yield* Scope.fork(scope);
-          const port = yield* listener(attempt, listenerScope);
+          // The platform's shutdown skips a server that has not reported its bind yet, so a
+          // cancellation while binding would leave it listening with no owner: bind uninterrupted.
+          const port = yield* listener(attempt, listenerScope).pipe(Effect.uninterruptible);
           const record: Pairing = {
             version: 1,
             phase: "pairing",
@@ -581,16 +583,22 @@ const make = Effect.gen(function* () {
   const disconnect = Effect.fn("EditaiiConnection.disconnect")(function* () {
     yield* Deferred.await(ready);
     yield* assertReadable();
-    const previous = yield* writes.withPermits(1)(
-      Effect.sync(() => {
-        const current = session;
-        session = undefined;
-        return current;
+    // Releasing the session, closing what it owns and recording the disconnection are one
+    // transition: a cancellation in between would leave a closed attempt recorded as usable.
+    yield* Effect.uninterruptible(
+      Effect.gen(function* () {
+        const previous = yield* writes.withPermits(1)(
+          Effect.sync(() => {
+            const current = session;
+            session = undefined;
+            return current;
+          }),
+        );
+        if (previous) yield* Scope.close(previous.scope, Exit.void);
+        yield* writes.withPermits(1)(
+          save({ version: 1, phase: "disconnected", origin: stored.origin, environmentId }),
+        );
       }),
-    );
-    if (previous) yield* Scope.close(previous.scope, Exit.void);
-    yield* writes.withPermits(1)(
-      save({ version: 1, phase: "disconnected", origin: stored.origin, environmentId }),
     );
   }, commands.withPermits(1));
 

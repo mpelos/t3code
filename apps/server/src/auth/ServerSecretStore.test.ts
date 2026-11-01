@@ -91,6 +91,8 @@ const layerRecordingFileSystem = (log: Array<string>) =>
                 }),
             ),
           ),
+        chmod: (path, mode) =>
+          Effect.sync(() => log.push("chmod")).pipe(Effect.andThen(fileSystem.chmod(path, mode))),
         rename: (from, to) =>
           Effect.sync(() => log.push("rename")).pipe(Effect.andThen(fileSystem.rename(from, to))),
       } satisfies FileSystem.FileSystem;
@@ -193,7 +195,7 @@ it.layer(NodeServices.layer)("ServerSecretStore.layer", (it) => {
     }).pipe(Effect.provide(layerPermissionDeniedSecretStore())),
   );
 
-  it.effect("syncs a replaced secret's contents before publishing it", () => {
+  it.effect("finishes a replaced secret before publishing it; the rename is the last step", () => {
     const log: Array<string> = [];
     return Effect.gen(function* () {
       const secretStore = yield* ServerSecretStore.ServerSecretStore;
@@ -201,7 +203,15 @@ it.layer(NodeServices.layer)("ServerSecretStore.layer", (it) => {
       yield* secretStore.set("pairing-record", Uint8Array.from([1, 2, 3]));
       yield* secretStore.set("pairing-record", Uint8Array.from([4, 5]));
 
-      assert.deepStrictEqual(log, ["sync", "rename", "sync", "rename"]);
+      // Nothing can fail after the rename: an error from set always means the old value stands.
+      assert.deepStrictEqual(log.slice(log.indexOf("sync")), [
+        "sync",
+        "chmod",
+        "rename",
+        "sync",
+        "chmod",
+        "rename",
+      ]);
       const stored = yield* secretStore.get("pairing-record");
       assert.deepStrictEqual(Option.getOrThrow(stored), Uint8Array.from([4, 5]));
     }).pipe(Effect.provide(layerRecordingSecretStore(log)));
