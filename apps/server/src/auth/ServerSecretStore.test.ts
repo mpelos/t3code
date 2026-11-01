@@ -71,6 +71,38 @@ const layerRenameFailureSecretStore = () =>
     Layer.provideMerge(layerRenameFailureFileSystem),
   );
 
+const layerRecordingFileSystem = (log: Array<string>) =>
+  Layer.effect(
+    FileSystem.FileSystem,
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+
+      return {
+        ...fileSystem,
+        open: (path, options) =>
+          fileSystem.open(path, options).pipe(
+            Effect.map(
+              (file) =>
+                new Proxy(file, {
+                  get: (target, key) =>
+                    key === "sync"
+                      ? target.sync.pipe(Effect.tap(() => Effect.sync(() => log.push("sync"))))
+                      : Reflect.get(target, key, target),
+                }),
+            ),
+          ),
+        rename: (from, to) =>
+          Effect.sync(() => log.push("rename")).pipe(Effect.andThen(fileSystem.rename(from, to))),
+      } satisfies FileSystem.FileSystem;
+    }),
+  ).pipe(Layer.provide(NodeServices.layer));
+
+const layerRecordingSecretStore = (log: Array<string>) =>
+  ServerSecretStore.layer.pipe(
+    Layer.provide(layerServerConfig()),
+    Layer.provideMerge(layerRecordingFileSystem(log)),
+  );
+
 const layerConcurrentReadMissFileSystem = Layer.effect(
   FileSystem.FileSystem,
   Effect.gen(function* () {
@@ -160,6 +192,20 @@ it.layer(NodeServices.layer)("ServerSecretStore.layer", (it) => {
       assert.equal((error.cause as PlatformError.PlatformError).reason._tag, "PermissionDenied");
     }).pipe(Effect.provide(layerPermissionDeniedSecretStore())),
   );
+
+  it.effect("syncs a replaced secret's contents before publishing it", () => {
+    const log: Array<string> = [];
+    return Effect.gen(function* () {
+      const secretStore = yield* ServerSecretStore.ServerSecretStore;
+
+      yield* secretStore.set("pairing-record", Uint8Array.from([1, 2, 3]));
+      yield* secretStore.set("pairing-record", Uint8Array.from([4, 5]));
+
+      assert.deepStrictEqual(log, ["sync", "rename", "sync", "rename"]);
+      const stored = yield* secretStore.get("pairing-record");
+      assert.deepStrictEqual(Option.getOrThrow(stored), Uint8Array.from([4, 5]));
+    }).pipe(Effect.provide(layerRecordingSecretStore(log)));
+  });
 
   it.effect("propagates write failures instead of treating them as success", () =>
     Effect.gen(function* () {
