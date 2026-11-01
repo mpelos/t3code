@@ -162,6 +162,7 @@ const make = Effect.gen(function* () {
     };
     return yield* SubscriptionRef.set(view, next);
   });
+  // A replacement may already be durable when cancellation arrives; always finish its projection.
   const save = Effect.fn("EditaiiConnection.save")(function* (next: Stored) {
     const json = yield* encodeRecord(next).pipe(
       Effect.mapError((cause) => new EditaiiConnectionError({ reason: "storage", cause })),
@@ -172,7 +173,7 @@ const make = Effect.gen(function* () {
     );
     stored = next;
     yield* publish();
-  });
+  }, Effect.uninterruptible);
   const assertReadable = Effect.fn("EditaiiConnection.assertReadable")(function* () {
     if (readFailure) return yield* readFailure;
   });
@@ -251,15 +252,8 @@ const make = Effect.gen(function* () {
   );
 
   const redeem = Effect.fn("EditaiiConnection.redeem")(function* (record: Redeeming) {
-    const machine = yield* request(record, "redeem").pipe(
-      Effect.matchEffect({
-        onFailure: (error) =>
-          error.reason === "authentication" || error.reason === "conflict"
-            ? request(record, "activate")
-            : Effect.fail(error),
-        onSuccess: () => request(record, "activate"),
-      }),
-    );
+    yield* request(record, "redeem");
+    const machine = yield* request(record, "activate");
     yield* writes.withPermits(1)(
       Effect.gen(function* () {
         if (session?.attempt !== record.attempt) return;
@@ -505,43 +499,70 @@ const make = Effect.gen(function* () {
       !/^.{1,80}$/u.test(machineName.trim())
     )
       return yield* new EditaiiConnectionError({ reason: "configuration" });
-    const scope = yield* Scope.make();
     const attempt = NodeCrypto.randomBytes(32).toString("base64url");
-    session = { scope, attempt };
-    const listenerScope = yield* Scope.make();
-    yield* Scope.addFinalizer(scope, Scope.close(listenerScope, Exit.void));
-    const port = yield* listener(attempt, listenerScope).pipe(
-      Effect.tapError(() => Scope.close(scope, Exit.void)),
+    return yield* Effect.acquireUseRelease(
+      Scope.make(),
+      (scope) =>
+        Effect.gen(function* () {
+          const listenerScope = yield* Scope.fork(scope);
+          const port = yield* listener(attempt, listenerScope);
+          const record: Pairing = {
+            version: 1,
+            phase: "pairing",
+            origin: stored.origin,
+            environmentId,
+            attempt,
+            state: NodeCrypto.randomBytes(32).toString("base64url"),
+            verifier: NodeCrypto.randomBytes(32).toString("base64url"),
+            credential: NodeCrypto.randomBytes(32).toString("base64url"),
+            machineName: machineName.trim(),
+            port,
+            expiresAt: (yield* clock.currentTimeMillis) + PAIRING_LIFETIME,
+          };
+          // Persist and arm expiry before transferring the scope to the session; cancellation cannot split the handoff.
+          yield* writes
+            .withPermits(1)(
+              Effect.gen(function* () {
+                yield* save(record);
+                yield* Effect.sleep("10 minutes").pipe(
+                  Effect.andThen(
+                    writes.withPermits(1)(
+                      Effect.gen(function* () {
+                        if (session?.attempt === attempt && stored.phase === "pairing")
+                          yield* publish("expired");
+                      }),
+                    ),
+                  ),
+                  Effect.andThen(Scope.close(listenerScope, Exit.void)),
+                  Effect.forkIn(scope),
+                );
+                session = { scope, attempt };
+                yield* publish();
+              }),
+            )
+            .pipe(Effect.uninterruptible);
+          yield* openBrowser(record).pipe(Effect.tapError((error) => publish(error.reason)));
+        }),
+      (scope, exit) =>
+        Effect.gen(function* () {
+          if (session?.scope === scope && !Exit.hasInterrupts(exit)) return;
+          yield* writes.withPermits(1)(
+            Effect.sync(() => {
+              if (session?.scope === scope) session = undefined;
+            }),
+          );
+          yield* Scope.close(scope, exit);
+          yield* writes.withPermits(1)(
+            Effect.gen(function* () {
+              if (
+                (stored.phase === "pairing" || stored.phase === "redeeming") &&
+                stored.attempt === attempt
+              )
+                yield* publish("interrupted");
+            }),
+          );
+        }),
     );
-    const record: Pairing = {
-      version: 1,
-      phase: "pairing",
-      origin: stored.origin,
-      environmentId,
-      attempt,
-      state: NodeCrypto.randomBytes(32).toString("base64url"),
-      verifier: NodeCrypto.randomBytes(32).toString("base64url"),
-      credential: NodeCrypto.randomBytes(32).toString("base64url"),
-      machineName: machineName.trim(),
-      port,
-      expiresAt: (yield* clock.currentTimeMillis) + PAIRING_LIFETIME,
-    };
-    yield* writes
-      .withPermits(1)(save(record))
-      .pipe(Effect.tapError(() => Scope.close(scope, Exit.void)));
-    yield* Effect.sleep("10 minutes").pipe(
-      Effect.andThen(
-        writes.withPermits(1)(
-          Effect.gen(function* () {
-            if (session?.attempt === attempt && stored.phase === "pairing")
-              yield* publish("expired");
-          }),
-        ),
-      ),
-      Effect.andThen(Scope.close(listenerScope, Exit.void)),
-      Effect.forkIn(scope),
-    );
-    yield* openBrowser(record).pipe(Effect.tapError((error) => publish(error.reason)));
   }, commands.withPermits(1));
 
   const reopenBrowser = Effect.fn("EditaiiConnection.reopenBrowser")(function* () {

@@ -51,7 +51,7 @@ export function editaiiProblemMessage(reason: typeof EditaiiProblem.Type): strin
     case "expired":
       return "This pairing expired. Disconnect this attempt and start again.";
     case "interrupted":
-      return "Pairing was interrupted before its callback arrived. Disconnect this attempt and start again.";
+      return "Pairing was interrupted. Disconnect this attempt and start again.";
     case "protocol":
       return "Editaii returned an unexpected response.";
   }

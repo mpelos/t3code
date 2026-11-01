@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Real loopback servers prove listener cleanup and Fetch redirect policy.
+import * as NodeHttp from "node:http";
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId } from "@t3tools/contracts";
@@ -7,6 +10,7 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
@@ -16,6 +20,8 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -27,6 +33,15 @@ import type { EditaiiConnectionState } from "@t3tools/contracts";
 const ORIGIN = "https://editaii.example";
 const ENVIRONMENT = EnvironmentId.make("test-editaii-environment");
 const decodeBody = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
+const decodePairing = Schema.decodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      phase: Schema.Literal("pairing"),
+      origin: Schema.String,
+      port: Schema.Number,
+    }),
+  ),
+);
 const decodeRedemption = Schema.decodeUnknownEffect(
   Schema.Struct({
     codigo: Schema.String,
@@ -49,11 +64,19 @@ const harness = Effect.fn("test.EditaiiConnection.harness")(function* (
     initial?: Uint8Array;
     unreadable?: boolean;
     headless?: boolean;
+    httpClient?: HttpClient.HttpClient;
     reply?: (request: HttpClientRequest.HttpClientRequest) => Effect.Effect<Response>;
   } = {},
 ) {
   let saved = options.initial;
   let failSave = false;
+  let pausedSave:
+    | {
+        arrived: Deferred.Deferred<Uint8Array>;
+        resume: Deferred.Deferred<void>;
+        afterCommit: boolean;
+      }
+    | undefined;
   const failRead = options.unreadable ?? false;
   const browser = yield* Deferred.make<URL>();
   const urls: URL[] = [];
@@ -72,18 +95,21 @@ const harness = Effect.fn("test.EditaiiConnection.harness")(function* (
           )
         : Effect.succeed(Option.fromUndefinedOr(saved)),
     set: (_name, bytes) =>
-      Effect.suspend(() =>
-        failSave
-          ? Effect.fail(
-              new ServerSecretStore.SecretStorePersistError({
-                resource: "test",
-                cause: new Error("unwritable"),
-              }),
-            )
-          : Effect.sync(() => {
-              saved = bytes;
-            }),
-      ),
+      Effect.gen(function* () {
+        if (failSave)
+          return yield* new ServerSecretStore.SecretStorePersistError({
+            resource: "test",
+            cause: new Error("unwritable"),
+          });
+        const paused = pausedSave;
+        pausedSave = undefined;
+        if (paused?.afterCommit) saved = bytes;
+        if (paused) {
+          yield* Deferred.succeed(paused.arrived, bytes);
+          yield* Deferred.await(paused.resume);
+        }
+        saved = bytes;
+      }),
     create: () => Effect.die("unused create"),
     getOrCreateRandom: () => Effect.die("unused random"),
     remove: () =>
@@ -117,19 +143,20 @@ const harness = Effect.fn("test.EditaiiConnection.harness")(function* (
     }),
     Layer.succeed(
       HttpClient.HttpClient,
-      HttpClient.make((request, _url, signal) =>
-        Effect.gen(function* () {
-          requests.push(request);
-          signals.push(signal);
-          const response = options.reply
-            ? yield* options.reply(request)
-            : Response.json({
-                ...MACHINE,
-                ativada_em: request.url.endsWith("/ativar") ? MACHINE.ativada_em : null,
-              });
-          return HttpClientResponse.fromWeb(request, response);
-        }),
-      ),
+      options.httpClient ??
+        HttpClient.make((request, _url, signal) =>
+          Effect.gen(function* () {
+            requests.push(request);
+            signals.push(signal);
+            const response = options.reply
+              ? yield* options.reply(request)
+              : Response.json({
+                  ...MACHINE,
+                  ativada_em: request.url.endsWith("/ativar") ? MACHINE.ativada_em : null,
+                });
+            return HttpClientResponse.fromWeb(request, response);
+          }),
+        ),
     ),
   );
   const scope = yield* Scope.make();
@@ -147,6 +174,13 @@ const harness = Effect.fn("test.EditaiiConnection.harness")(function* (
     signals,
     urls,
     saved: () => saved,
+    pauseNextSave: (afterCommit: boolean) =>
+      Effect.gen(function* () {
+        const arrived = yield* Deferred.make<Uint8Array>();
+        const resume = yield* Deferred.make<void>();
+        pausedSave = { arrived, resume, afterCommit };
+        return { arrived, resume };
+      }),
     jumpWallClock: () => {
       wallOffset = 10 * 60 * 1000;
     },
@@ -165,6 +199,23 @@ const harness = Effect.fn("test.EditaiiConnection.harness")(function* (
         return yield* Deferred.await(browser);
       }),
   };
+});
+
+const loopback = Effect.fn("test.EditaiiConnection.loopback")(function* (
+  handle: Effect.Effect<
+    HttpServerResponse.HttpServerResponse,
+    never,
+    HttpServerRequest.HttpServerRequest
+  >,
+) {
+  const server = yield* NodeHttpServer.make(() => NodeHttp.createServer(), {
+    host: "127.0.0.1",
+    port: 0,
+  });
+  if (server.address._tag === "UnixPathAddress")
+    return yield* Effect.die("Expected a TCP listener");
+  yield* server.serve(handle);
+  return `http://127.0.0.1:${server.address.port}`;
 });
 
 const waitFor = (
@@ -218,6 +269,112 @@ const callback = Effect.fn("test.EditaiiConnection.callback")(function* (
 });
 
 it.layer(NodeServices.layer)("Editaii connection", (it) => {
+  it.effect("cancellation after a configuration write still publishes the committed origin", () =>
+    Effect.gen(function* () {
+      const h = yield* harness();
+      const paused = yield* h.pauseNextSave(true);
+      const configuring = yield* h.connection.configure({ origin: ORIGIN }).pipe(Effect.forkChild);
+      yield* Deferred.await(paused.arrived);
+      const cancellation = yield* Fiber.interrupt(configuring).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* Deferred.succeed(paused.resume, undefined);
+      yield* Fiber.join(cancellation);
+      expect(Exit.hasInterrupts(yield* Fiber.await(configuring))).toBe(true);
+      expect(yield* decodeBody(new TextDecoder().decode(h.saved()))).toMatchObject({
+        phase: "disconnected",
+        origin: ORIGIN,
+      });
+      expect(yield* h.connection.state).toMatchObject({ status: "disconnected", origin: ORIGIN });
+    }),
+  );
+  it.effect.each([false, true])(
+    "cancellation during persistence closes the listener and preserves a coherent interrupted record (committed: %s)",
+    (afterCommit) =>
+      Effect.gen(function* () {
+        const h = yield* harness();
+        yield* h.connection.configure({ origin: ORIGIN });
+        const paused = yield* h.pauseNextSave(afterCommit);
+        const starting = yield* h.connection
+          .startPairing({ machineName: "Office" })
+          .pipe(Effect.forkChild);
+        const bytes = yield* Deferred.await(paused.arrived);
+        const record = yield* decodePairing(new TextDecoder().decode(bytes));
+        const cancellation = yield* Fiber.interrupt(starting).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Deferred.succeed(paused.resume, undefined);
+        yield* Fiber.join(cancellation);
+        expect(Exit.hasInterrupts(yield* Fiber.await(starting))).toBe(true);
+        const request = yield* HttpClient.get(
+          `http://127.0.0.1:${record.port}/editaii/parear`,
+        ).pipe(Effect.provide(FetchHttpClient.layer), Effect.result);
+        expect(request._tag).toBe("Failure");
+        expect(yield* h.connection.state).toMatchObject({
+          status: "error",
+          problem: "interrupted",
+          origin: record.origin,
+          canReopen: false,
+        });
+        expect(yield* decodePairing(new TextDecoder().decode(h.saved()))).toEqual(record);
+        expect(h.urls).toHaveLength(0);
+        yield* h.connection.disconnect();
+        const second = yield* h.begin();
+        yield* h.connection.disconnect();
+        expect((yield* callback(second).pipe(Effect.result))._tag).toBe("Failure");
+        expect(yield* h.connection.state).toMatchObject({
+          status: "disconnected",
+          canReopen: false,
+        });
+      }),
+  );
+
+  it.effect.each(["redeem", "activate"] as const)(
+    "Fetch never forwards %s credentials to a redirect destination",
+    (operation) =>
+      Effect.gen(function* () {
+        const received: string[] = [];
+        const target = yield* loopback(
+          Effect.gen(function* () {
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            received.push(request.url);
+            return HttpServerResponse.jsonUnsafe(MACHINE);
+          }),
+        );
+        const sent: { secret: string | undefined; credential: string | undefined }[] = [];
+        const source = yield* loopback(
+          Effect.gen(function* () {
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            sent.push({
+              secret: request.headers["cf-access-client-secret"],
+              credential: request.headers["editaii-credencial"],
+            });
+            if (operation === "activate" && request.url.endsWith("resgatar"))
+              return HttpServerResponse.jsonUnsafe(MACHINE);
+            return HttpServerResponse.empty({
+              status: 302,
+              headers: { location: `${target}/stolen` },
+            });
+          }),
+        );
+        const fetch = yield* HttpClient.HttpClient.pipe(Effect.provide(FetchHttpClient.layer));
+        // Production still requires HTTPS; this transport maps its origin to the real loopback fixture.
+        const client = HttpClient.mapRequest(fetch, (request) =>
+          HttpClientRequest.setUrl(request, request.url.replace(ORIGIN, source)),
+        );
+        const h = yield* harness({ httpClient: client });
+        yield* callback(yield* h.begin());
+        yield* waitFor(
+          h.connection,
+          (state) => state.status === "error" || state.status === "connected",
+        );
+        expect(received).toEqual([]);
+        expect((yield* h.connection.state).problem).toBe("authentication");
+        expect(sent.length).toBeGreaterThan(0);
+        expect(sent.every((request) => request.secret === "test-secret")).toBe(true);
+        if (operation === "activate") expect(sent.at(-1)?.credential).toMatch(/^[\w-]{43}$/);
+      }),
+  );
   it.effect("binds only the exact loopback address in the pairing URL", () =>
     Effect.gen(function* () {
       const h = yield* harness();
@@ -385,13 +542,9 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
     }),
   );
 
-  it.effect("refuses redirects, Access login HTML and malformed success responses", () =>
+  it.effect("refuses Access login HTML and malformed success responses", () =>
     Effect.gen(function* () {
       for (const [response, reason] of [
-        [
-          new Response(null, { status: 302, headers: { location: "https://login.example" } }),
-          "authentication",
-        ],
         [new Response("login", { headers: { "content-type": "text/html" } }), "authentication"],
         [Response.json({ unexpected: true }), "protocol"],
         [new Response("{broken", { headers: { "content-type": "application/json" } }), "protocol"],
@@ -401,7 +554,6 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
         yield* callback(url);
         yield* waitFor(h.connection, (s) => s.status === "error");
         expect((yield* h.connection.state).problem).toBe(reason);
-        expect(h.requests.every((r) => new URL(r.url).origin === ORIGIN)).toBe(true);
       }
     }),
   );
@@ -469,30 +621,25 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       }),
   );
 
-  it.effect(
-    "can activate the original credential when its redemption code can no longer be repeated",
-    () =>
+  it.effect.each([403, 409])(
+    "a definitive redemption refusal (%s) never tries activation",
+    (status) =>
       Effect.gen(function* () {
-        const started = yield* Deferred.make<void>();
-        let replaced = false;
         const h = yield* harness({
           reply: (request) =>
-            Effect.gen(function* () {
-              if (request.url.endsWith("resgatar")) {
-                if (replaced) return Response.json({ erro: "proibido" }, { status: 403 });
-                yield* Deferred.succeed(started, undefined);
-                return yield* Effect.never;
-              }
-              return Response.json(MACHINE);
-            }),
+            Effect.succeed(
+              request.url.endsWith("resgatar")
+                ? Response.json({ erro: "recusado" }, { status })
+                : Response.json(MACHINE),
+            ),
         });
         const url = yield* h.begin();
         yield* callback(url);
-        yield* Deferred.await(started);
-        replaced = true;
-        const restarted = yield* h.restart();
-        yield* waitFor(restarted.connection, (s) => s.status === "connected");
-        expect(restarted.requests).toHaveLength(2);
+        yield* waitFor(h.connection, (s) => s.status === "connected" || s.status === "error");
+        expect(h.requests).toHaveLength(1);
+        expect((yield* h.connection.state).problem).toBe(
+          status === 403 ? "authentication" : "conflict",
+        );
       }),
   );
 
