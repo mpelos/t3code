@@ -207,8 +207,9 @@ export const make = Effect.gen(function* () {
             }),
           );
           yield* fileSystem.chmod(tempPath, 0o600);
-          // The rename publishes the finished file, mode included, and is the last step: a failure
-          // from `set` always means the previous value still stands.
+          // The rename publishes the finished file, mode included, and is the last step: a typed
+          // failure from `set` always means the previous value still stands. An interruption during
+          // the rename is not covered; callers that need that guard it, as EditaiiConnection does.
           yield* fileSystem.rename(tempPath, secretPath);
         }).pipe(
           Effect.catch((cause) =>
