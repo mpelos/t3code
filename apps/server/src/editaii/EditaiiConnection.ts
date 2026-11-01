@@ -34,35 +34,19 @@ import {
   EditaiiConnectionState,
   EditaiiMachine,
   EditaiiProblem,
-} from "./EditaiiConnectionState.ts";
+  EditaiiRequestError,
+  editaiiProblemMessage,
+} from "@t3tools/contracts";
 
 export class EditaiiConnectionError extends Schema.TaggedError<EditaiiConnectionError>()(
   "EditaiiConnectionError",
   { reason: EditaiiProblem, cause: Schema.optional(Schema.Defect()) },
 ) {
   override get message(): string {
-    switch (this.reason) {
-      case "configuration":
-        return "Configure an HTTPS Editaii origin while disconnected.";
-      case "storage":
-        return "Could not read or save the Editaii connection. Its credentials have not been discarded.";
-      case "listener":
-        return "Could not start the Editaii callback on this computer.";
-      case "browser":
-        return "Could not open a browser on the computer running T3. Open its graphical session and try again.";
-      case "network":
-        return "Could not reach Editaii. The connection will retry without discarding its credentials.";
-      case "authentication":
-        return "Editaii or Cloudflare Access refused the connection.";
-      case "conflict":
-        return "Editaii refused this pairing because it conflicts with an existing connection.";
-      case "expired":
-        return "This pairing expired. Start again from T3.";
-      case "interrupted":
-        return "Pairing was interrupted before its callback arrived. Start again from T3.";
-      case "protocol":
-        return "Editaii returned an unexpected response.";
-    }
+    return editaiiProblemMessage(this.reason);
+  }
+  toClientError() {
+    return new EditaiiRequestError({ reason: this.reason });
   }
 }
 
@@ -119,6 +103,7 @@ const MAX_CALLBACK_BYTES = 8192;
 const encodeRecord = Schema.encodeEffect(RecordJson);
 const decodeRecord = Schema.decodeEffect(RecordJson);
 const decodeMachine = Schema.decodeUnknownEffect(EditaiiMachine);
+const decodeJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 export class EditaiiConnection extends Context.Service<
   EditaiiConnection,
@@ -191,69 +176,79 @@ const make = Effect.gen(function* () {
   const assertReadable = Effect.fn("EditaiiConnection.assertReadable")(function* () {
     if (readFailure) return yield* readFailure;
   });
-  const request = Effect.fn("EditaiiConnection.request")(function* (
-    record: Redeeming,
-    operation: "redeem" | "activate",
-  ) {
-    if (record.origin === null)
-      return yield* new EditaiiConnectionError({ reason: "configuration" });
-    const credentialHash = NodeCrypto.createHash("sha256").update(record.credential).digest("hex");
-    const req = HttpClientRequest.post(
-      `${record.origin}/api/maquina/${operation === "redeem" ? "parear/resgatar" : "ativar"}`,
-    ).pipe(
-      HttpClientRequest.setHeaders({
-        "CF-Access-Client-Id": record.client_id,
-        "CF-Access-Client-Secret": record.client_secret,
-      }),
-      HttpClientRequest.bodyJsonUnsafe(
-        operation === "redeem"
-          ? { codigo: record.code, verificador: record.verifier, credencial_hash: credentialHash }
-          : {},
-      ),
-    );
-    const response = yield* http
-      .execute(
-        operation === "activate"
-          ? HttpClientRequest.setHeader(req, "Editaii-Credencial", record.credential)
-          : req,
+  const request = Effect.fn("EditaiiConnection.request")(
+    function* (record: Redeeming, operation: "redeem" | "activate") {
+      if (record.origin === null)
+        return yield* new EditaiiConnectionError({ reason: "configuration" });
+      const credentialHash = NodeCrypto.createHash("sha256")
+        .update(record.credential)
+        .digest("hex");
+      const req = HttpClientRequest.post(
+        `${record.origin}/api/maquina/${operation === "redeem" ? "parear/resgatar" : "ativar"}`,
+      ).pipe(
+        HttpClientRequest.setHeaders({
+          "CF-Access-Client-Id": record.client_id,
+          "CF-Access-Client-Secret": record.client_secret,
+        }),
+        HttpClientRequest.bodyJsonUnsafe(
+          operation === "redeem"
+            ? { codigo: record.code, verificador: record.verifier, credencial_hash: credentialHash }
+            : {},
+        ),
+      );
+      const response = yield* HttpClient.withScope(http)
+        .execute(
+          operation === "activate"
+            ? HttpClientRequest.setHeader(req, "Editaii-Credencial", record.credential)
+            : req,
+        )
+        .pipe(
+          Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+          Effect.mapError((cause) => new EditaiiConnectionError({ reason: "network", cause })),
+        );
+      if (
+        (response.status >= 300 && response.status < 400) ||
+        response.status === 401 ||
+        response.status === 403
       )
-      .pipe(
-        Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
-        Effect.timeout("20 seconds"),
+        return yield* new EditaiiConnectionError({ reason: "authentication" });
+      if (response.status === 409) return yield* new EditaiiConnectionError({ reason: "conflict" });
+      if (response.status >= 500) return yield* new EditaiiConnectionError({ reason: "network" });
+      if (
+        response.status === 200 &&
+        response.headers["content-type"]?.toLowerCase().startsWith("text/html")
+      )
+        return yield* new EditaiiConnectionError({ reason: "authentication" });
+      if (
+        response.status !== 200 ||
+        !response.headers["content-type"]?.toLowerCase().startsWith("application/json")
+      )
+        return yield* new EditaiiConnectionError({ reason: "protocol" });
+      const text = yield* response.text.pipe(
         Effect.mapError((cause) => new EditaiiConnectionError({ reason: "network", cause })),
       );
-    if (
-      (response.status >= 300 && response.status < 400) ||
-      response.status === 401 ||
-      response.status === 403
-    )
-      return yield* new EditaiiConnectionError({ reason: "authentication" });
-    if (response.status === 409) return yield* new EditaiiConnectionError({ reason: "conflict" });
-    if (response.status >= 500) return yield* new EditaiiConnectionError({ reason: "network" });
-    if (
-      response.status === 200 &&
-      response.headers["content-type"]?.toLowerCase().startsWith("text/html")
-    )
-      return yield* new EditaiiConnectionError({ reason: "authentication" });
-    if (
-      response.status !== 200 ||
-      !response.headers["content-type"]?.toLowerCase().startsWith("application/json")
-    )
-      return yield* new EditaiiConnectionError({ reason: "protocol" });
-    const json = yield* response.json.pipe(
-      Effect.mapError((cause) => new EditaiiConnectionError({ reason: "network", cause })),
-    );
-    const machine = yield* decodeMachine(json).pipe(
-      Effect.mapError((cause) => new EditaiiConnectionError({ reason: "protocol", cause })),
-    );
-    if (
-      machine.ambiente_t3 !== environmentId ||
-      machine.revogada_em !== null ||
-      (operation === "activate" && machine.ativada_em === null)
-    )
-      return yield* new EditaiiConnectionError({ reason: "protocol" });
-    return machine;
-  }, Effect.withTracerEnabled(false));
+      const json = yield* decodeJson(text).pipe(
+        Effect.mapError((cause) => new EditaiiConnectionError({ reason: "protocol", cause })),
+      );
+      const machine = yield* decodeMachine(json).pipe(
+        Effect.mapError((cause) => new EditaiiConnectionError({ reason: "protocol", cause })),
+      );
+      if (
+        machine.ambiente_t3 !== environmentId ||
+        machine.revogada_em !== null ||
+        (operation === "activate" && machine.ativada_em === null)
+      )
+        return yield* new EditaiiConnectionError({ reason: "protocol" });
+      return machine;
+    },
+    Effect.scoped,
+    Effect.timeout("20 seconds"),
+    Effect.catchTags({
+      TimeoutError: (cause) =>
+        Effect.fail(new EditaiiConnectionError({ reason: "network", cause })),
+    }),
+    Effect.withTracerEnabled(false),
+  );
 
   const redeem = Effect.fn("EditaiiConnection.redeem")(function* (record: Redeeming) {
     const machine = yield* request(record, "redeem").pipe(

@@ -11,6 +11,11 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
 // Trace queries and dashboards depend on these labels, including deviations from method prefixes.
 const RPC_AGGREGATES = {
+  [WS_METHODS.editaiiConfigure]: "editaii",
+  [WS_METHODS.editaiiStartPairing]: "editaii",
+  [WS_METHODS.editaiiReopenBrowser]: "editaii",
+  [WS_METHODS.editaiiDisconnect]: "editaii",
+  [WS_METHODS.editaiiSubscribe]: "editaii",
   [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: "orchestrationV2",
   [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: "orchestration",

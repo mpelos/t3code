@@ -132,6 +132,55 @@ describe("RPC scope middleware", () => {
 });
 
 describe("settings mutation authorization", () => {
+  it.effect("requires settings permission before any Editaii mutation reaches its handler", () =>
+    Effect.gen(function* () {
+      const tags = [
+        WS_METHODS.editaiiConfigure,
+        WS_METHODS.editaiiStartPairing,
+        WS_METHODS.editaiiReopenBrowser,
+        WS_METHODS.editaiiDisconnect,
+      ] as const;
+      const editaii = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof tags)[number]> =>
+            !tags.some((known) => known === tag),
+        ),
+      );
+      let handled = 0;
+      const handle = () =>
+        Effect.sync(() => {
+          handled++;
+        });
+      const handlers = Layer.mergeAll(
+        editaii.toLayerHandler(WS_METHODS.editaiiConfigure, handle),
+        editaii.toLayerHandler(WS_METHODS.editaiiStartPairing, handle),
+        editaii.toLayerHandler(WS_METHODS.editaiiReopenBrowser, handle),
+        editaii.toLayerHandler(WS_METHODS.editaiiDisconnect, handle),
+      );
+      const denied = yield* RpcTest.makeClient(editaii).pipe(
+        Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([AuthOrchestrationReadScope]))),
+      );
+      for (const result of yield* Effect.all([
+        denied[WS_METHODS.editaiiConfigure]({ origin: "https://editaii.example" }).pipe(
+          Effect.flip,
+        ),
+        denied[WS_METHODS.editaiiStartPairing]({ machineName: "Office" }).pipe(Effect.flip),
+        denied[WS_METHODS.editaiiReopenBrowser]({}).pipe(Effect.flip),
+        denied[WS_METHODS.editaiiDisconnect]({}).pipe(Effect.flip),
+      ]))
+        expect(result).toMatchObject({ requiredPermission: AuthSettingsWriteScope });
+      expect(handled).toBe(0);
+      const allowed = yield* RpcTest.makeClient(editaii).pipe(
+        Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([AuthSettingsWriteScope]))),
+      );
+      yield* allowed[WS_METHODS.editaiiConfigure]({ origin: "https://editaii.example" });
+      yield* allowed[WS_METHODS.editaiiStartPairing]({ machineName: "Office" });
+      yield* allowed[WS_METHODS.editaiiReopenBrowser]({});
+      yield* allowed[WS_METHODS.editaiiDisconnect]({});
+      expect(handled).toBe(4);
+    }).pipe(Effect.scoped),
+  );
+
   const group = WsRpcGroup.omit(
     ...[...WsRpcGroup.requests.keys()].filter(
       (

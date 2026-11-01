@@ -5,6 +5,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -21,10 +22,18 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ExternalLauncher from "../process/externalLauncher.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as EditaiiConnection from "./EditaiiConnection.ts";
-import type { EditaiiConnectionState } from "./EditaiiConnectionState.ts";
+import type { EditaiiConnectionState } from "@t3tools/contracts";
 
 const ORIGIN = "https://editaii.example";
 const ENVIRONMENT = EnvironmentId.make("test-editaii-environment");
+const decodeBody = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
+const decodeRedemption = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    codigo: Schema.String,
+    verificador: Schema.String,
+    credencial_hash: Schema.String,
+  }),
+);
 const MACHINE = {
   id: "machine",
   nome: "Office",
@@ -49,6 +58,7 @@ const harness = Effect.fn("test.EditaiiConnection.harness")(function* (
   const browser = yield* Deferred.make<URL>();
   const urls: URL[] = [];
   const requests: HttpClientRequest.HttpClientRequest[] = [];
+  const signals: AbortSignal[] = [];
   const clock = yield* Clock.Clock;
   let wallOffset = 0;
   const store = ServerSecretStore.ServerSecretStore.of({
@@ -107,10 +117,16 @@ const harness = Effect.fn("test.EditaiiConnection.harness")(function* (
     }),
     Layer.succeed(
       HttpClient.HttpClient,
-      HttpClient.make((request) =>
+      HttpClient.make((request, _url, signal) =>
         Effect.gen(function* () {
           requests.push(request);
-          const response = options.reply ? yield* options.reply(request) : Response.json(MACHINE);
+          signals.push(signal);
+          const response = options.reply
+            ? yield* options.reply(request)
+            : Response.json({
+                ...MACHINE,
+                ativada_em: request.url.endsWith("/ativar") ? MACHINE.ativada_em : null,
+              });
           return HttpClientResponse.fromWeb(request, response);
         }),
       ),
@@ -128,6 +144,7 @@ const harness = Effect.fn("test.EditaiiConnection.harness")(function* (
   return {
     connection,
     requests,
+    signals,
     urls,
     saved: () => saved,
     jumpWallClock: () => {
@@ -253,6 +270,27 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
           expect(req.headers["cf-access-client-secret"]).toBe("test-secret");
         }
         expect(h.requests[1]?.headers["editaii-credencial"]).toMatch(/^[\w-]{43}$/);
+        const bodies = yield* Effect.forEach(h.requests, (request) => {
+          if (request.body._tag !== "Uint8Array") throw new Error("Expected a JSON request");
+          return decodeBody(new TextDecoder().decode(request.body.body));
+        });
+        const redemption = yield* decodeRedemption(bodies[0]);
+        const digest = (value: string) =>
+          crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+        const challenge = Buffer.from(
+          yield* Effect.promise(() => digest(redemption.verificador)),
+        ).toString("base64url");
+        expect(challenge).toBe(url.searchParams.get("desafio"));
+        const credentialHash = Buffer.from(
+          yield* Effect.promise(() => digest(h.requests[1]?.headers["editaii-credencial"] ?? "")),
+        ).toString("hex");
+        expect(redemption).toEqual({
+          codigo: "c".repeat(43),
+          verificador: redemption.verificador,
+          credencial_hash: credentialHash,
+        });
+        expect(bodies[1]).toEqual({});
+        expect(h.signals.every((signal) => signal.aborted)).toBe(true);
         expect((yield* callback(url)).status).toBe(410);
         const state = yield* h.connection.state;
         expect(JSON.stringify(state)).not.toContain("test-secret");
@@ -356,6 +394,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
         ],
         [new Response("login", { headers: { "content-type": "text/html" } }), "authentication"],
         [Response.json({ unexpected: true }), "protocol"],
+        [new Response("{broken", { headers: { "content-type": "application/json" } }), "protocol"],
       ] as const) {
         const h = yield* harness({ reply: () => Effect.succeed(response.clone()) });
         const url = yield* h.begin();
@@ -377,6 +416,30 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       yield* restarted.connection.disconnect();
       expect((yield* restarted.connection.state).status).toBe("disconnected");
     }),
+  );
+
+  it.effect(
+    "times out a stalled response body and cancels its request without discarding recovery",
+    () =>
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const h = yield* harness({
+          reply: () =>
+            Deferred.succeed(started, undefined).pipe(
+              Effect.as(
+                new Response(new ReadableStream(), {
+                  headers: { "content-type": "application/json" },
+                }),
+              ),
+            ),
+        });
+        yield* callback(yield* h.begin());
+        yield* Deferred.await(started);
+        yield* TestClock.adjust("20 seconds");
+        yield* waitFor(h.connection, (state) => state.problem === "network");
+        expect(h.signals.every((signal) => signal.aborted)).toBe(true);
+        expect(new TextDecoder().decode(h.saved())).toContain('"phase":"redeeming"');
+      }),
   );
 
   it.effect(

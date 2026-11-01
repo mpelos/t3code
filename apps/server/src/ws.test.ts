@@ -1,4 +1,5 @@
 import * as Speech from "./speech/Speech.ts";
+import * as EditaiiConnection from "./editaii/EditaiiConnection.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -528,6 +529,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(SourceControlSignIn.SourceControlSignIn)({}),
   Layer.mock(StorageCleanup.StorageCleanup)({}),
   Layer.mock(Speech.Speech)({}),
+  Layer.mock(EditaiiConnection.EditaiiConnection)({}),
   Layer.mock(DatabaseStorage.DatabaseStorage)({}),
   Layer.mock(TerminalManager.TerminalManager)({}),
   Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),

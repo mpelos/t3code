@@ -84,6 +84,12 @@ import {
 } from "./auth.ts";
 import { ClientActivityReportInput } from "./background.ts";
 import {
+  EditaiiConfigureInput,
+  EditaiiStartPairingInput,
+  EditaiiConnectionState,
+  EditaiiRequestError,
+} from "./editaii.ts";
+import {
   FilesystemGetMetadataInput,
   FilesystemGetMetadataResult,
   FilesystemBrowseInput,
@@ -505,6 +511,11 @@ export const WS_METHODS = {
   peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverUpdateSettings: "server.updateSettings",
   speechConfigure: "speech.configure",
+  editaiiConfigure: "editaii.configure",
+  editaiiStartPairing: "editaii.startPairing",
+  editaiiReopenBrowser: "editaii.reopenBrowser",
+  editaiiDisconnect: "editaii.disconnect",
+  editaiiSubscribe: "editaii.subscribe",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
@@ -805,6 +816,29 @@ const WsPeerLinksAnswerRequestRpc = Rpc.make(WS_METHODS.peerLinksAnswerRequest, 
 const WsSpeechConfigureRpc = Rpc.make(WS_METHODS.speechConfigure, {
   payload: SpeechConfigureInput,
   error: Schema.Union([SpeechError, ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+const WsEditaiiConfigureRpc = Rpc.make(WS_METHODS.editaiiConfigure, {
+  payload: EditaiiConfigureInput,
+  error: Schema.Union([EditaiiRequestError, EnvironmentAuthorizationError]),
+});
+const WsEditaiiStartPairingRpc = Rpc.make(WS_METHODS.editaiiStartPairing, {
+  payload: EditaiiStartPairingInput,
+  error: Schema.Union([EditaiiRequestError, EnvironmentAuthorizationError]),
+});
+const WsEditaiiReopenBrowserRpc = Rpc.make(WS_METHODS.editaiiReopenBrowser, {
+  payload: Schema.Struct({}),
+  error: Schema.Union([EditaiiRequestError, EnvironmentAuthorizationError]),
+});
+const WsEditaiiDisconnectRpc = Rpc.make(WS_METHODS.editaiiDisconnect, {
+  payload: Schema.Struct({}),
+  error: Schema.Union([EditaiiRequestError, EnvironmentAuthorizationError]),
+});
+const WsEditaiiSubscribeRpc = Rpc.make(WS_METHODS.editaiiSubscribe, {
+  payload: Schema.Struct({}),
+  success: EditaiiConnectionState,
+  stream: true,
+  error: EnvironmentAuthorizationError,
 });
 
 const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -1969,6 +2003,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetDatabaseStorageRpc,
   WsServerUpdateSettingsRpc,
   WsSpeechConfigureRpc,
+  WsEditaiiConfigureRpc,
+  WsEditaiiStartPairingRpc,
+  WsEditaiiReopenBrowserRpc,
+  WsEditaiiDisconnectRpc,
+  WsEditaiiSubscribeRpc,
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,

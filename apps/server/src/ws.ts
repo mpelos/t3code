@@ -1,4 +1,5 @@
 import * as Speech from "./speech/Speech.ts";
+import * as EditaiiConnection from "./editaii/EditaiiConnection.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -1336,6 +1337,7 @@ export const layerWsRpc = (
       const databaseStorage = yield* DatabaseStorage.DatabaseStorage;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const speech = yield* Speech.Speech;
+      const editaii = yield* EditaiiConnection.EditaiiConnection;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -2491,6 +2493,15 @@ export const layerWsRpc = (
         [WS_METHODS.serverRunStorageCleanup]: () => storageCleanup.runNow,
         [WS_METHODS.serverGetStorageCleanupReport]: () => storageCleanup.reports,
         [WS_METHODS.serverGetDatabaseStorage]: () => databaseStorage.status,
+        [WS_METHODS.editaiiSubscribe]: () => editaii.changes,
+        [WS_METHODS.editaiiConfigure]: (input) =>
+          editaii.configure(input).pipe(Effect.mapError((error) => error.toClientError())),
+        [WS_METHODS.editaiiStartPairing]: (input) =>
+          editaii.startPairing(input).pipe(Effect.mapError((error) => error.toClientError())),
+        [WS_METHODS.editaiiReopenBrowser]: () =>
+          editaii.reopenBrowser().pipe(Effect.mapError((error) => error.toClientError())),
+        [WS_METHODS.editaiiDisconnect]: () =>
+          editaii.disconnect().pipe(Effect.mapError((error) => error.toClientError())),
         [WS_METHODS.peerLinksList]: (_input) =>
           peerLinks.list.pipe(Effect.map((links) => ({ links }))),
         [WS_METHODS.peerLinksLink]: (input) => peerLinks.link(input),
