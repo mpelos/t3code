@@ -348,9 +348,9 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
         });
         expect(yield* decodePairing(new TextDecoder().decode(h.saved()))).toEqual(record);
         expect(h.urls).toHaveLength(0);
-        yield* h.connection.disconnect();
+        yield* h.connection.disconnect(null);
         const second = yield* h.begin();
-        yield* h.connection.disconnect();
+        yield* h.connection.disconnect(null);
         expect((yield* callback(second).pipe(Effect.result))._tag).toBe("Failure");
         expect(yield* h.connection.state).toMatchObject({
           status: "disconnected",
@@ -595,7 +595,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       const restarted = yield* h.restart();
       expect((yield* restarted.connection.state).problem).toBe("interrupted");
       expect(restarted.urls).toHaveLength(0);
-      yield* restarted.connection.disconnect();
+      yield* restarted.connection.disconnect(null);
       expect((yield* restarted.connection.state).status).toBe("disconnected");
     }),
   );
@@ -687,7 +687,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       const url = yield* h.begin();
       yield* callback(url);
       yield* Deferred.await(started);
-      yield* h.connection.disconnect();
+      yield* h.connection.disconnect(null);
       yield* Deferred.await(ended);
       expect((yield* h.connection.state).status).toBe("disconnected");
       expect(new TextDecoder().decode(h.saved())).not.toContain("test-secret");
@@ -734,7 +734,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       const url = yield* h.begin();
       // Runs until the listener is closing, then is cancelled there.
       const disconnecting = yield* h.connection
-        .disconnect()
+        .disconnect(null)
         .pipe(Effect.forkChild({ startImmediately: true }));
       yield* Fiber.interrupt(disconnecting);
       expect(yield* h.connection.state).toMatchObject({ status: "disconnected", canReopen: false });
@@ -857,7 +857,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
           )
           .pipe(Effect.forkChild);
         const session = yield* Deferred.await(started);
-        yield* h.connection.disconnect();
+        yield* h.connection.disconnect(EditaiiConnection.vinculoDo(yield* h.connection.state));
         expect(yield* Deferred.isDone(ended)).toBe(true);
         expect(Exit.isSuccess(yield* Fiber.await(using))).toBe(true);
         expect((yield* session.proxima.pipe(Effect.flip)).reason).toBe("interrupted");
@@ -942,6 +942,26 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
     }),
   );
 
+  it.effect("a disconnect for a link that is not the current one changes nothing", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({ initial: CONNECTED });
+      const link = EditaiiConnection.vinculoDo(yield* h.connection.state);
+      if (link === null) throw new Error("expected a connected link");
+      expect(yield* h.connection.disconnect(null)).toBe(false);
+      expect(yield* h.connection.disconnect({ ...link, maquina: "outra" })).toBe(false);
+      expect(yield* h.connection.disconnect({ ...link, origem: "https://outro.example" })).toBe(
+        false,
+      );
+      expect(yield* h.connection.disconnect({ ...link, ambiente: "outro" })).toBe(false);
+      expect((yield* h.connection.state).status).toBe("connected");
+      expect(yield* h.connection.disconnect(link)).toBe(true);
+      expect((yield* h.connection.state).status).toBe("disconnected");
+      // Nothing is connected now: only a request that expects no link applies.
+      expect(yield* h.connection.disconnect(link)).toBe(false);
+      expect(yield* h.connection.disconnect(null)).toBe(true);
+    }),
+  );
+
   it.effect("the session's work owns its scope: a disconnect releases what it acquired", () =>
     Effect.gen(function* () {
       const h = yield* harness({ initial: CONNECTED });
@@ -963,7 +983,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
         )
         .pipe(Effect.scoped, Effect.forkChild);
       yield* Deferred.await(ready);
-      yield* h.connection.disconnect();
+      yield* h.connection.disconnect(EditaiiConnection.vinculoDo(yield* h.connection.state));
       expect(yield* Deferred.isDone(released)).toBe(true);
       expect(yield* Deferred.isDone(helperEnded)).toBe(true);
       yield* Fiber.join(using);

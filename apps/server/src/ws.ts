@@ -2501,7 +2501,11 @@ export const layerWsRpc = (
         [WS_METHODS.editaiiReopenBrowser]: () =>
           editaii.reopenBrowser().pipe(Effect.mapError((error) => error.toClientError())),
         [WS_METHODS.editaiiDisconnect]: () =>
-          editaii.disconnect().pipe(Effect.mapError((error) => error.toClientError())),
+          editaii.state.pipe(
+            Effect.flatMap((state) => editaii.disconnect(EditaiiConnection.vinculoDo(state))),
+            Effect.asVoid,
+            Effect.mapError((error) => error.toClientError()),
+          ),
         [WS_METHODS.peerLinksList]: (_input) =>
           peerLinks.list.pipe(Effect.map((links) => ({ links }))),
         [WS_METHODS.peerLinksLink]: (input) => peerLinks.link(input),

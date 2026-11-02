@@ -122,6 +122,21 @@ export interface EditaiiVinculo {
   readonly ambiente: string;
 }
 
+// Pairing accepts only a machine issued for this T3 environment, so its `ambiente_t3` is ours.
+const linkOf = (origin: string, machine: typeof EditaiiMachine.Type): EditaiiVinculo => ({
+  origem: origin,
+  maquina: machine.id,
+  ambiente: machine.ambiente_t3,
+});
+const sameLink = (a: EditaiiVinculo | null, b: EditaiiVinculo | null) =>
+  a === null || b === null
+    ? a === b
+    : a.origem === b.origem && a.maquina === b.maquina && a.ambiente === b.ambiente;
+
+/** The link the panel shows: the connected machine's, or null while no machine is connected. */
+export const vinculoDo = (state: EditaiiConnectionState): EditaiiVinculo | null =>
+  state.origin !== null && state.machine !== null ? linkOf(state.origin, state.machine) : null;
+
 /**
  * What a connected machine says to the Editaii (docs/protocolo-maquinas.md in the editaii
  * repository). Calls fail with `conflict` when the Worker answers 409, which is about the work,
@@ -151,7 +166,14 @@ export class EditaiiConnection extends Context.Service<
       readonly machineName: string;
     }) => Effect.Effect<void, EditaiiConnectionError>;
     readonly reopenBrowser: () => Effect.Effect<void, EditaiiConnectionError>;
-    readonly disconnect: () => Effect.Effect<void, EditaiiConnectionError>;
+    /**
+     * Disconnects if the link is the expected one: null while no machine is connected (it cancels
+     * a pairing), the connected link otherwise. Any other link is left as it is, and the result
+     * is false: a late request to abandon one link never disconnects the next.
+     */
+    readonly disconnect: (
+      expected: EditaiiVinculo | null,
+    ) => Effect.Effect<boolean, EditaiiConnectionError>;
     /**
      * Runs `usar` with the session of the next connected period, in a scope of its own that the
      * connection owns, and returns when `usar` ends or the session does. Disconnecting, or
@@ -349,7 +371,7 @@ const make = Effect.gen(function* () {
       ),
     );
     const opened: EditaiiSession = {
-      vinculo: { origem: record.origin, maquina: record.machine.id, ambiente: environmentId },
+      vinculo: linkOf(record.origin, record.machine),
       proxima: sessionCall(
         "maquina/entregas/proxima",
         { versao_protocolo: Protocol.PROTOCOL_VERSION },
@@ -720,25 +742,33 @@ const make = Effect.gen(function* () {
     yield* publish();
   }, commands.withPermits(1));
 
-  const disconnect = Effect.fn("EditaiiConnection.disconnect")(function* () {
+  const disconnect = Effect.fn("EditaiiConnection.disconnect")(function* (
+    expected: EditaiiVinculo | null,
+  ) {
     yield* Deferred.await(ready);
     yield* assertReadable();
-    // Releasing the session, closing what it owns and recording the disconnection are one
-    // transition: a cancellation in between would leave a closed attempt recorded as usable.
-    yield* Effect.uninterruptible(
+    // Comparing the link, releasing the session, closing what it owns and recording the
+    // disconnection are one transition: a cancellation in between would leave a closed attempt
+    // recorded as usable, and a redemption finishing in between would be a link nobody expected.
+    return yield* Effect.uninterruptible(
       Effect.gen(function* () {
         const previous = yield* writes.withPermits(1)(
           Effect.sync(() => {
-            const current = session;
+            const current =
+              stored.phase === "connected" ? linkOf(stored.origin, stored.machine) : null;
+            if (!sameLink(current, expected)) return false;
+            const released = session;
             session = undefined;
-            return current;
+            return { released };
           }),
         );
-        if (previous) yield* Scope.close(previous.scope, Exit.void);
+        if (previous === false) return false;
+        if (previous.released) yield* Scope.close(previous.released.scope, Exit.void);
         yield* closeSession;
         yield* writes.withPermits(1)(
           save({ version: 1, phase: "disconnected", origin: stored.origin, environmentId }),
         );
+        return true;
       }),
     );
   }, commands.withPermits(1));
