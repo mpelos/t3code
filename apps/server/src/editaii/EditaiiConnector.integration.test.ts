@@ -5,9 +5,13 @@
  * the mark that says there is work for it.
  */
 import { assert, describe, it } from "@effect/vitest";
+import { CommandId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -16,6 +20,7 @@ import * as Maquinas from "./EditaiiConnector.testkit.ts";
 import type * as Journal from "./EditaiiJournal.ts";
 import * as T3 from "./EditaiiT3Adapter.testkit.ts";
 import * as Adapter from "./EditaiiT3Adapter.ts";
+import * as Receipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as Worker from "../orchestration-v2/EffectWorker.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 
@@ -32,6 +37,31 @@ const noT3 =
   <S>(t3: { readonly context: Context.Context<S> }) =>
   <A, E, R>(efeito: Effect.Effect<A, E, R>) =>
     efeito.pipe(Effect.provide(t3.context));
+
+/**
+ * The T3's adapter, counting the calls that change the T3: the T3 takes a repeated command as the
+ * same one, so only here does a second call show.
+ */
+const contando = (chamadas: { accept: number; respond: number }) =>
+  Layer.effect(
+    Adapter.EditaiiT3Adapter,
+    Effect.gen(function* () {
+      const adapter = yield* Adapter.EditaiiT3Adapter;
+      return Adapter.EditaiiT3Adapter.of({
+        ...adapter,
+        accept: (plano) =>
+          Effect.suspend(() => {
+            chamadas.accept += 1;
+            return adapter.accept(plano);
+          }),
+        respond: (plano) =>
+          Effect.suspend(() => {
+            chamadas.respond += 1;
+            return adapter.respond(plano);
+          }),
+      });
+    }),
+  );
 
 /**
  * Request 1 runs on the T3 of `h` to its answer, the journal records that the Worker has it, and
@@ -177,6 +207,70 @@ describe("EditaiiConnector over the real T3", () => {
         ]);
         assert.deepEqual(m.worker.invalidos, []);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "the connector alone fails after the T3 took the request, then the answer: reading decides",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* T3.harness("editaii-connector-queda");
+        const m = yield* Maquinas.make(configuracao);
+        const chamadas = { accept: 0, respond: 0 };
+        const t3 = yield* m.ligar(contando(chamadas).pipe(Layer.provideMerge(h.layer)));
+        const worker = Context.get(t3.context, Worker.OrchestrationEffectWorkerV2);
+        const recibo = (n: number) => JSON.parse(m.worker.confirmacoes[n]?.recibo ?? "null");
+
+        // The T3 takes the request and the journal fails to record it; the next period reads it.
+        const liberado = yield* noT3(t3)(h.release());
+        m.falhar.add("resolver");
+        m.worker.pedir(1);
+        yield* m.pausa;
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+        const turn = yield* noT3(t3)(h.beginTurn(liberado));
+        assert.include(recibo(0), { thread: turn.threadId, run: turn.runId });
+
+        yield* noT3(t3)(h.question(turn, "question", "x"));
+        yield* m.quando(() => m.worker.estado(1) === "aguardando_pessoa");
+        const [intervencao] = m.worker.aplicados;
+        if (intervencao?.tipo !== "intervencao") return assert.fail("expected the intervention");
+        // The same with the answer. The end of the wait the T3 shows is held from the Worker,
+        // which serves an answer again only while it waits for it.
+        const retomado = yield* Maquinas.travarEventos(m, (e) => e.tipo === "retomado");
+        m.falhar.add("resolver");
+        m.worker.responder(
+          1,
+          Object.fromEntries(intervencao.perguntas.map((p) => [p.id, { texto: `sim, ${p.id}` }])),
+        );
+        yield* m.pausa;
+        yield* m.quando(() => m.worker.confirmacoes.length === 2);
+        yield* Deferred.succeed(retomado, undefined);
+        assert.isFalse(m.falhar.has("resolver"));
+        yield* worker.drain();
+        assert.deepEqual(chamadas, { accept: 1, respond: 1 });
+        assert.strictEqual(h.responses.length, 1);
+        const comando = recibo(1)?.comando;
+        const tomado = yield* noT3(t3)(
+          Receipts.CommandReceiptStoreV2.use((r) => r.getByCommandId(CommandId.make(comando))),
+        );
+        assert.isTrue(Option.isSome(tomado));
+
+        yield* noT3(t3)(h.finish(turn, "Pronto."));
+        yield* m.quando(() => m.worker.estado(1) === "concluido");
+        const { projection } = yield* noT3(t3)(
+          Orchestrator.OrchestratorV2.use((engine) => engine.getThreadSnapshot(turn.threadId)),
+        );
+        assert.deepEqual(
+          projection.runs.map((r) => r.id),
+          [turn.runId],
+        );
+        assert.strictEqual(yield* Queue.size(h.started), 0);
+        assert.deepEqual(Maquinas.tipos(m.worker.aplicados), [
+          "trabalho-1:1:intervencao",
+          "trabalho-1:2:retomado",
+          "trabalho-1:3:resposta",
+        ]);
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped),
   );
 
   it.effect(

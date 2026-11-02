@@ -159,6 +159,8 @@ const fakeWorker = (mudou: Sinal) => {
     recusados: [] as Array<Protocol.Evento>,
     /** A receipt for which this gives a gate waits for it before reaching the Worker. */
     travarRecibo: (_entregaId: string): Deferred.Deferred<void> | undefined => undefined,
+    /** An event for which this gives a gate waits for it before reaching the Worker. */
+    travarEvento: (_evento: Protocol.Evento): Deferred.Deferred<void> | undefined => undefined,
     /** The next call of this kind is applied, and its reply lost. */
     perderResposta: new Set<"confirmar" | "eventos">(),
     /** Deliveries whose receipt the Worker refuses, as when it names another thread. */
@@ -344,6 +346,8 @@ const fakeWorker = (mudou: Sinal) => {
     if (path === "maquina/eventos") {
       const eventos = body.eventos ?? [];
       for (const evento of eventos) {
+        const trava = w.travarEvento(evento);
+        if (trava !== undefined) yield* Deferred.await(trava);
         w.enviados.push(textoDoEvento(evento));
         const status = aplicar(evento);
         if (status !== 200) return new Response("", { status });
@@ -396,8 +400,9 @@ export const make = Effect.fn("EditaiiMaquina.make")(function* (
   };
   // The journal as it is, but for the next call of each operation named in `falhar`, which fails,
   // and for `desligar`, which holds after writing the intent while `segurarDesligar` is set.
-  const falhar = new Set<"observar" | "proximoEvento">();
-  const falha = (operacao: "observar" | "proximoEvento") =>
+  type Operacao = "observar" | "proximoEvento" | "resolver";
+  const falhar = new Set<Operacao>();
+  const falha = (operacao: Operacao) =>
     falhar.delete(operacao)
       ? Effect.fail(new Journal.EditaiiJournalError({ reason: "storage", detail: operacao }))
       : Effect.void;
@@ -416,6 +421,8 @@ export const make = Effect.fn("EditaiiMaquina.make")(function* (
         observar: (v, trabalhoId, o) =>
           falha("observar").pipe(Effect.andThen(j.observar(v, trabalhoId, o))),
         proximoEvento: (v) => falha("proximoEvento").pipe(Effect.andThen(j.proximoEvento(v))),
+        resolver: (v, entregaId, desfecho) =>
+          falha("resolver").pipe(Effect.andThen(j.resolver(v, entregaId, desfecho))),
         eventoEnviado: (v, evento, resultado) =>
           j.eventoEnviado(v, evento, resultado).pipe(
             Effect.tap(() =>
@@ -536,5 +543,16 @@ export const travar = (m: Pick<Maquina, "worker">, entregaId: (id: string) => bo
   Effect.gen(function* () {
     const trava = yield* Deferred.make<void>();
     m.worker.travarRecibo = (id) => (entregaId(id) ? trava : undefined);
+    return trava;
+  });
+
+/** The events chosen wait for the gate returned before reaching the Worker. */
+export const travarEventos = (
+  m: Pick<Maquina, "worker">,
+  escolhido: (evento: Protocol.Evento) => boolean,
+) =>
+  Effect.gen(function* () {
+    const trava = yield* Deferred.make<void>();
+    m.worker.travarEvento = (evento) => (escolhido(evento) ? trava : undefined);
     return trava;
   });
