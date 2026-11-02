@@ -326,6 +326,7 @@ const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
   const question = Effect.fn("EditaiiT3Adapter.testQuestion")(function* (
     turn: ProviderAdapter.ProviderAdapterV2TurnInput,
     kind: "question" | "approval" | "not_resumable" | "message",
+    name: string = kind,
   ) {
     const engine = yield* Orchestrator.OrchestratorV2;
     const providerTurn = (yield* engine.getThreadProjection(turn.threadId)).providerTurns.find(
@@ -335,7 +336,7 @@ const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
     const providerSessionId = turn.providerThread.providerSessionId;
     if (providerSessionId === null) return yield* Effect.die("provider session missing");
     const now = yield* DateTime.now;
-    const id = RuntimeRequestId.make(`request:${turn.attemptId}:${kind}`);
+    const id = RuntimeRequestId.make(`request:${turn.attemptId}:${name}`);
     const nodeId = NodeId.make(`node:${id}`);
     const itemId = TurnItemId.make(`item:${id}`);
     const persisted = yield* watch(
@@ -426,7 +427,60 @@ const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
     yield* Fiber.join(persisted);
     return id;
   });
-  return { layer, events, started, responses, start, finish, question, dependencies };
+  // The startup reconcile: it cancels live runs, turns pending questions into ones answered by
+  // message, and expires other requests. It reads and writes the database the harness runs on.
+  const recover = Recovery.ProviderRuntimeRecoveryService.use((r) => r.reconcile("startup")).pipe(
+    Effect.provide(
+      Recovery.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ProjectionStore.layer,
+            EffectOutbox.layer,
+            IdAllocator.layer,
+            Settings.layerTest(),
+          ),
+        ),
+      ),
+    ),
+  );
+  const endRun = Effect.fn("EditaiiT3Adapter.testEndRun")(function* (
+    turn: ProviderAdapter.ProviderAdapterV2TurnInput,
+    status: "failed" | "cancelled",
+  ) {
+    const engine = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const run = (yield* engine.getThreadProjection(turn.threadId)).runs.find(
+      (r) => r.id === turn.runId,
+    );
+    if (!run) return yield* Effect.die("run missing");
+    const now = yield* DateTime.now;
+    yield* sink.writeWithEffects({
+      commandId: CommandId.make(`end:${run.id}`),
+      events: [
+        {
+          id: EventId.make(`end:${run.id}`),
+          type: "run.updated",
+          threadId: turn.threadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: { ...run, status, completedAt: now },
+        },
+      ],
+      effects: [],
+    });
+  });
+  return {
+    layer,
+    events,
+    started,
+    responses,
+    start,
+    finish,
+    question,
+    recover,
+    endRun,
+    dependencies,
+  };
 });
 
 it.effect("accepts the same launch and queued message once; inspect recovers without writing", () =>
@@ -950,23 +1004,7 @@ it.effect(
           const { acceptance, turn } = yield* h.start(plan("recovered-question"));
           const requestId = yield* h.question(turn, "question");
           const approvalId = yield* h.question(turn, "approval");
-          // The startup reconcile cancels the run, turns the live question into one answered by
-          // message, and expires the approval.
-          yield* Recovery.ProviderRuntimeRecoveryService.use((r) => r.reconcile("startup")).pipe(
-            Effect.provide(
-              Recovery.layer.pipe(
-                // Reads and writes the same database the harness runs on.
-                Layer.provide(
-                  Layer.mergeAll(
-                    ProjectionStore.layer,
-                    EffectOutbox.layer,
-                    IdAllocator.layer,
-                    Settings.layerTest(),
-                  ),
-                ),
-              ),
-            ),
-          );
+          yield* h.recover;
           // One observer follows the whole job: the ended run must not end it while a question waits.
           const asked = yield* Deferred.make<void>();
           const observing = yield* adapter.observe(acceptance).pipe(
@@ -1098,6 +1136,185 @@ it.effect("reports a thread deleted between its shell and snapshot reads as lost
             ["thread_lost"],
           );
         }).pipe(Effect.provide(Adapter.layer.pipe(Layer.provide(stale), Layer.fresh)));
+      }).pipe(Effect.provide(h.layer));
+    }),
+  ),
+);
+
+const answerTo = (
+  turn: ProviderAdapter.ProviderAdapterV2TurnInput,
+  requestId: RuntimeRequestId,
+): Adapter.AnswerPlan => ({
+  version: 1,
+  threadId: turn.threadId,
+  requestId,
+  commandId: CommandId.make(`answer:${requestId}`),
+  answers: Object.fromEntries([
+    ["constructor", "Yes"],
+    ["__proto__", "Safe"],
+  ]),
+});
+
+// Two questions answered by message after a restart start two runs; both are leaves of the lineage.
+const branches = (name: string, firstEnds: "failed" | "completed") =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* harness(name);
+      return yield* Effect.gen(function* () {
+        const adapter = yield* Adapter.EditaiiT3Adapter;
+        const worker = yield* Worker.OrchestrationEffectWorkerV2;
+        const { acceptance, turn } = yield* h.start(plan(name));
+        const first = yield* h.question(turn, "question", "first");
+        const second = yield* h.question(turn, "question", "second");
+        yield* h.recover;
+        const startedBy = (requestId: RuntimeRequestId) =>
+          Effect.gen(function* () {
+            const running = yield* watch(
+              (e) => e.type === "provider-turn.updated" && e.payload.status === "running",
+            );
+            assert.equal((yield* adapter.respond(answerTo(turn, requestId))).type, "accepted");
+            yield* worker.drain();
+            const next = yield* Queue.take(h.started);
+            yield* Fiber.join(running);
+            return next;
+          });
+        const earlier = yield* startedBy(first);
+        const pending = yield* adapter.observe(acceptance).pipe(
+          Stream.filter((o) => o.type === "question"),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        // The question still waiting belongs to the run that asked it, not to the live one.
+        assert.include(pending[0], { requestId: second, runId: acceptance.runId });
+        if (firstEnds === "failed") yield* h.endRun(earlier, "failed");
+        else yield* h.finish(earlier, "Answer to the first question");
+        const later = yield* startedBy(second);
+        assert.isAbove(later.runOrdinal, earlier.runOrdinal);
+        yield* h.finish(later, "Answer to the second question");
+        const observed = yield* Stream.runCollect(adapter.observe(acceptance));
+        return { observed, earlier, later };
+      }).pipe(Effect.provide(h.layer));
+    }),
+  );
+
+it.effect("fails the job when one answered branch fails, even if a later branch completes", () =>
+  Effect.gen(function* () {
+    const { observed, earlier } = yield* branches("editaii-branch-failed", "failed");
+    assert.isFalse(observed.some((o) => o.type === "answer"));
+    assert.include(observed.at(-1), { type: "failure", runId: earlier.runId });
+  }),
+);
+
+it.effect("answers with the latest branch when every answered branch completes", () =>
+  Effect.gen(function* () {
+    const { observed, later } = yield* branches("editaii-branch-completed", "completed");
+    assert.isFalse(observed.some((o) => o.type === "failure"));
+    assert.include(observed.at(-1), {
+      type: "answer",
+      runId: later.runId,
+      text: "Answer to the second question",
+    });
+  }),
+);
+
+it.effect("ends the job when the pending requests of its ended run can no longer be answered", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* harness("editaii-unanswerable");
+      yield* Effect.gen(function* () {
+        const adapter = yield* Adapter.EditaiiT3Adapter;
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const { acceptance, turn } = yield* h.start(plan("unanswerable"));
+        yield* h.question(turn, "not_resumable");
+        const approvalId = yield* h.question(turn, "approval");
+        const approval = (yield* engine.getThreadProjection(turn.threadId)).runtimeRequests.find(
+          (r) => r.id === approvalId,
+        );
+        if (!approval) return yield* Effect.die("approval missing");
+        const closed = yield* watch(
+          (e) =>
+            e.type === "runtime-request.updated" &&
+            e.payload.id === approvalId &&
+            e.payload.responseCapability.type === "not_resumable",
+        );
+        yield* Queue.offer(h.events, {
+          type: "runtime_request.updated",
+          driver,
+          threadId: turn.threadId,
+          runtimeRequest: {
+            ...approval,
+            responseCapability: { type: "not_resumable", reason: "Provider ended" },
+          },
+        });
+        yield* Fiber.join(closed);
+        assert.include(
+          (yield* adapter.observe(acceptance).pipe(
+            Stream.filter((o) => o.type === "approval"),
+            Stream.take(1),
+            Stream.runCollect,
+          ))[0],
+          { requestId: approvalId, capability: "not_resumable" },
+        );
+        yield* h.endRun(turn, "cancelled");
+        const observed = yield* Stream.runCollect(adapter.observe(acceptance));
+        assert.include(observed.at(-1), { type: "failure", reason: "run-ended" });
+      }).pipe(Effect.provide(h.layer));
+    }),
+  ),
+);
+
+it.effect("follows an answer steered into a run someone else started on the thread", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* harness("editaii-steered-answer");
+      yield* Effect.gen(function* () {
+        const adapter = yield* Adapter.EditaiiT3Adapter;
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* Worker.OrchestrationEffectWorkerV2;
+        const { acceptance, turn } = yield* h.start(plan("steered-answer"));
+        const requestId = yield* h.question(turn, "question");
+        yield* h.recover;
+        const asked = yield* Deferred.make<void>();
+        const observing = yield* adapter.observe(acceptance).pipe(
+          Stream.tap((o) =>
+            o.type === "question" ? Deferred.succeed(asked, undefined) : Effect.void,
+          ),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(asked);
+        const humanRunning = yield* watch(
+          (e) => e.type === "provider-turn.updated" && e.payload.status === "running",
+        );
+        yield* engine.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("human"),
+          threadId: turn.threadId,
+          messageId: MessageId.make("human"),
+          text: "Someone else's message",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          modelSelection,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* worker.drain();
+        const human = yield* Queue.take(h.started);
+        yield* Fiber.join(humanRunning);
+        assert.equal((yield* adapter.respond(answerTo(turn, requestId))).type, "accepted");
+        yield* worker.drain();
+        const steered = (yield* engine.getThreadProjection(turn.threadId)).messages.find(
+          (m) => m.id === `async-answer:${requestId}`,
+        );
+        assert.equal(steered?.runId, human.runId);
+        yield* h.finish(human, "Answer that took the steered reply");
+        const observed = yield* Fiber.join(observing);
+        assert.isFalse(observed.some((o) => o.type === "failure"));
+        assert.include(observed.at(-1), {
+          type: "answer",
+          runId: human.runId,
+          text: "Answer that took the steered reply",
+        });
       }).pipe(Effect.provide(h.layer));
     }),
   ),

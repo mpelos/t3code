@@ -5,6 +5,7 @@ import {
   ProjectId,
   RuntimeMode,
   ProviderInteractionMode,
+  type NodeId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -130,6 +131,7 @@ export type Observation = Origin &
         readonly runId: RunId;
         readonly requestId: RuntimeRequestId;
         readonly description: string;
+        readonly capability: "live" | "message" | "not_resumable";
       }
     | {
         readonly type: "resolved";
@@ -171,10 +173,10 @@ export class EditaiiT3Adapter extends Context.Service<
       known: Acceptance | null,
     ) => Effect.Effect<Inspection, T3ReadError>;
     /**
-     * Follows the work the acceptance started, across the runs that carry it (see `runLineage`).
-     * A question still pending is reported even when its run has ended: a T3 restart ends the run
-     * but keeps the question answerable by message. Only when nothing waits for a person does the
-     * latest run's end become the answer or the failure.
+     * Follows the runs that carry the accepted work (see `runLineage`). It stays open while a leaf
+     * run is live or a request the person can still answer is pending, even on an ended run. Then
+     * it ends with the failure of any leaf, else the latest leaf's answer. Each request carries the
+     * run that asked it.
      */
     readonly observe: (
       acceptance: Acceptance,
@@ -381,9 +383,14 @@ const make = Effect.gen(function* () {
         const read = Effect.fn("EditaiiT3Adapter.observeSnapshot")(function* () {
           let state = yield* snapshot(acceptance.threadId);
           while (state !== null) {
-            const current = runLineage(state.projection, acceptance.runId)?.run;
-            if (!current || !(yield* engine.restartContinuationPending(current))) break;
-            yield* engine.awaitRestartContinuation(current);
+            let restarting: OrchestrationV2Run | undefined;
+            for (const run of runLineage(state.projection, acceptance.runId)?.leaves ?? [])
+              if (yield* engine.restartContinuationPending(run)) {
+                restarting = run;
+                break;
+              }
+            if (!restarting) break;
+            yield* engine.awaitRestartContinuation(restarting);
             state = yield* snapshot(acceptance.threadId);
           }
           const lost = (reason: MismatchReason | "cursor"): Observation[] => [
@@ -514,6 +521,9 @@ const ENDED: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
   "rolled_back",
 ]);
 
+const answerable = (o: Observation) =>
+  (o.type === "question" || o.type === "approval") && o.capability !== "not_resumable";
+
 function observationsFor(
   projection: OrchestrationV2ThreadProjection,
   acceptance: Acceptance,
@@ -521,39 +531,52 @@ function observationsFor(
 ): Observation[] {
   const lineage = runLineage(projection, acceptance.runId);
   if (!lineage) return [{ type: "thread_lost", sequence, key: "lost:run", reason: "run" }];
-  const { run, related } = lineage;
-  const base = { sequence, runId: run.id };
-  const requests = requestObservations(projection, related, base);
-  if (!ENDED.has(run.status))
+  const requests = requestObservations(projection, lineage.related, sequence);
+  const live = lineage.leaves.find((run) => !ENDED.has(run.status));
+  if (live)
     return [
       ...requests,
-      { ...base, type: "running", key: `run:${run.id}:${run.status}`, status: run.status },
+      {
+        type: "running",
+        sequence,
+        runId: live.id,
+        key: `run:${live.id}:${live.status}`,
+        status: live.status,
+      },
     ];
-  if (requests.some((o) => o.type === "question" || o.type === "approval")) return requests;
-  return [...requests, outcome(projection, run, base)];
+  // Every leaf ended. A request the person can still answer keeps the work open: a T3 restart ends
+  // the run but keeps its questions answerable by message.
+  if (requests.some(answerable)) return requests;
+  const ends = lineage.leaves.map((run) => outcome(projection, run, sequence));
+  return [
+    ...requests,
+    ends.find((o) => o.type === "failure") ?? outcome(projection, lineage.leaves[0], sequence),
+  ];
 }
 
 function requestObservations(
   projection: OrchestrationV2ThreadProjection,
   related: ReadonlySet<RunId>,
-  base: { readonly sequence: number; readonly runId: RunId },
+  sequence: number,
 ): Observation[] {
-  const nodes = new Set(
-    projection.nodes.filter((n) => n.runId !== null && related.has(n.runId)).map((n) => n.id),
-  );
+  const owners = new Map<NodeId, RunId>();
+  for (const node of projection.nodes)
+    if (node.runId !== null && related.has(node.runId)) owners.set(node.id, node.runId);
   const observations: Observation[] = [];
   for (const request of projection.runtimeRequests) {
-    if (!nodes.has(request.nodeId)) continue;
+    const runId = owners.get(request.nodeId);
+    if (runId === undefined) continue;
     if (request.status !== "pending") {
       observations.push({
         type: "resolved",
-        sequence: base.sequence,
+        sequence,
         key: `request:${request.id}:${request.status}`,
         requestId: request.id,
         status: request.status,
       });
       continue;
     }
+    const capability = request.responseCapability.type;
     const item = projection.turnItems.find(
       (i) =>
         (i.type === "user_input_request" || i.type === "approval_request") &&
@@ -561,20 +584,23 @@ function requestObservations(
     );
     if (item?.type === "user_input_request")
       observations.push({
-        ...base,
         type: "question",
-        key: `request:${request.id}:pending:${request.responseCapability.type}`,
+        sequence,
+        runId,
+        key: `request:${request.id}:pending:${capability}`,
         requestId: request.id,
         questions: item.questions,
-        capability: request.responseCapability.type,
+        capability,
       });
     else if (item?.type === "approval_request")
       observations.push({
-        ...base,
         type: "approval",
-        key: `request:${request.id}:pending`,
+        sequence,
+        runId,
+        key: `request:${request.id}:pending:${capability}`,
         requestId: request.id,
         description: item.prompt ?? item.reason ?? "An approval is required in T3.",
+        capability,
       });
   }
   return observations;
@@ -583,8 +609,9 @@ function requestObservations(
 function outcome(
   projection: OrchestrationV2ThreadProjection,
   run: OrchestrationV2Run,
-  base: { readonly sequence: number; readonly runId: RunId },
+  sequence: number,
 ): Observation {
+  const base = { sequence, runId: run.id };
   if (run.status !== "completed")
     return {
       ...base,
@@ -634,15 +661,16 @@ const answerMessageId = (requestId: RuntimeRequestId) =>
   MessageId.make(`async-answer:${requestId}`);
 
 /**
- * The runs that carry the accepted work: the accepted run, the run T3 restarted it as, and the run
- * that received an answer given by message to one of their questions. The latest of them is the
- * current run, whose status decides the outcome.
+ * The runs that carry the accepted work, linked by cause: T3 restarted one as another, or a question
+ * of one was answered by message and that answer went to another. A leaf is a run nothing
+ * continues; only leaves can end the work. Leaves come latest first.
  */
 function runLineage(projection: OrchestrationV2ThreadProjection, rootId: RunId) {
   const root = projection.runs.find((r) => r.id === rootId);
   if (!root) return null;
   const lineage = [root];
   const related = new Set<RunId>([root.id]);
+  const continued = new Set<RunId>();
   // Iterating while appending also visits the runs each step adds.
   for (const run of lineage) {
     const nodes = new Set(projection.nodes.filter((n) => n.runId === run.id).map((n) => n.id));
@@ -655,14 +683,20 @@ function runLineage(projection: OrchestrationV2ThreadProjection, rootId: RunId) 
       projection.messages.filter((m) => answers.has(m.id)).map((m) => m.runId),
     );
     for (const next of projection.runs) {
-      if (related.has(next.id)) continue;
+      if (next.id === run.id) continue;
       if (next.restartContinuationOfRunId !== run.id && !answeredIn.has(next.id)) continue;
+      continued.add(run.id);
+      if (related.has(next.id)) continue;
       related.add(next.id);
       lineage.push(next);
     }
   }
-  const current = lineage.reduce((latest, run) => (run.ordinal > latest.ordinal ? run : latest));
-  return { run: current, related };
+  const [latest, ...earlier] = lineage
+    .filter((run) => !continued.has(run.id))
+    .sort((a, b) => b.ordinal - a.ordinal);
+  // A run only continues into work that came after it, so T3 never produces a lineage without a leaf.
+  if (!latest) return null;
+  return { related, leaves: [latest, ...earlier] as const };
 }
 
 export const layer = Layer.effect(EditaiiT3Adapter, make);
