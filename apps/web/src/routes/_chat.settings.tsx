@@ -150,7 +150,9 @@ function SettingsRouteLayout() {
   return (
     <SettingsScopeProvider
       search={rawSearch}
-      singleEnvironment={pathname === "/settings/providers" || pathname === "/settings/editaii"}
+      singleEnvironment={["/settings/providers", "/settings/secrets", "/settings/editaii"].includes(
+        pathname,
+      )}
       onChange={(next) => {
         // Send every axis so retain middleware recognizes "all" as an explicit target.
         void navigate({
