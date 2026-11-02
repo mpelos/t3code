@@ -8,12 +8,16 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Queue from "effect/Queue";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
 import * as Maquinas from "./EditaiiConnector.testkit.ts";
 import type * as Journal from "./EditaiiJournal.ts";
 import * as T3 from "./EditaiiT3Adapter.testkit.ts";
+import * as Adapter from "./EditaiiT3Adapter.ts";
 import * as Worker from "../orchestration-v2/EffectWorker.ts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 
 const configuracao: Journal.Configuracao = {
   type: "pronta",
@@ -28,6 +32,33 @@ const noT3 =
   <S>(t3: { readonly context: Context.Context<S> }) =>
   <A, E, R>(efeito: Effect.Effect<A, E, R>) =>
     efeito.pipe(Effect.provide(t3.context));
+
+/**
+ * Request 1 runs on the T3 of `h` to its answer, the journal records that the Worker has it, and
+ * the T3 stops. With `copia`, the T3's database is backed up there while the run is still live.
+ * Says the turn and the thread's last event sequence.
+ */
+const primeiroPedido = Effect.fn("test.primeiroPedido")(function* (
+  m: Maquinas.Maquina,
+  h: Effect.Success<ReturnType<typeof T3.harness>>,
+  copia?: string,
+) {
+  const t3 = yield* m.ligar(h.layer);
+  const liberado = yield* noT3(t3)(h.release());
+  m.worker.pedir(1);
+  const turn = yield* noT3(t3)(h.beginTurn(liberado));
+  yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+  if (copia !== undefined) {
+    yield* noT3(t3)(SqlClient.SqlClient.use((sql) => sql`VACUUM INTO ${copia}`));
+  }
+  yield* noT3(t3)(h.finish(turn, "Um"));
+  yield* m.quando(() => m.eventosGravados() === 1);
+  const sequencia = yield* noT3(t3)(
+    Orchestrator.OrchestratorV2.use((engine) => engine.getThreadEventSequence(turn.threadId)),
+  );
+  yield* t3.parar;
+  return { turn, sequencia };
+});
 
 describe("EditaiiConnector over the real T3", () => {
   it.effect("a request, a question with native values and its answer, through to the result", () =>
@@ -147,4 +178,67 @@ describe("EditaiiConnector over the real T3", () => {
         assert.deepEqual(m.worker.invalidos, []);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  describe("after a restart, the next request of a conversation", () => {
+    it.effect("runs when the T3 still has the end of its last job", () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = yield* fs.makeTempDirectoryScoped();
+        const h = yield* T3.harness("editaii-connector-intacto", `${dir}/t3.sqlite`, {
+          recoverOnStartup: true,
+        });
+        const m = yield* Maquinas.make(configuracao);
+        const { turn } = yield* primeiroPedido(m, h);
+
+        const t3 = yield* m.ligar(h.layer);
+        m.worker.pedir(2);
+        // The request's receipt reached the Worker: the T3 took it, on the conversation's thread.
+        yield* m.quando(() => m.worker.estado(2) === "em_execucao");
+        const seguinte = yield* noT3(t3)(h.nextTurn());
+        assert.strictEqual(seguinte.threadId, turn.threadId);
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "waits and stops when the T3 was restored to before that end, even with new events since",
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const dir = yield* fs.makeTempDirectoryScoped();
+          const restaurado = `${dir}/restaurado.sqlite`;
+          const h = yield* T3.harness("editaii-connector-original", `${dir}/t3.sqlite`, {
+            recoverOnStartup: true,
+          });
+          const m = yield* Maquinas.make(configuracao);
+          // The backup is taken while the run is live; the end comes after it.
+          const { turn, sequencia } = yield* primeiroPedido(m, h, restaurado);
+
+          // The T3 runs on the backup, without the connector, and someone writes in the thread:
+          // its events go past where the journal stopped.
+          const r = yield* T3.harness("editaii-connector-restaurado", restaurado, {
+            recoverOnStartup: true,
+          });
+          yield* Effect.gen(function* () {
+            const adapter = yield* Adapter.EditaiiT3Adapter;
+            const engine = yield* Orchestrator.OrchestratorV2;
+            yield* adapter.accept({ ...T3.plan("alguem", false), threadId: turn.threadId });
+            const outro = yield* r.nextTurn();
+            yield* r.finish(outro, "Outra conversa no T3.");
+            assert.isAtLeast(yield* engine.getThreadEventSequence(turn.threadId), sequencia);
+          }).pipe(Effect.provide(r.layer), Effect.scoped);
+
+          yield* m.ligar(r.layer);
+          m.worker.pedir(2);
+          yield* m.quando(() => m.worker.estado(2) === "reconciliacao");
+          assert.strictEqual(yield* Queue.size(r.started), 0);
+          assert.strictEqual(m.worker.estado(1), "concluido");
+          assert.deepEqual(Maquinas.tipos(m.worker.aplicados), [
+            "trabalho-1:1:resposta",
+            "trabalho-2:1:thread_perdida",
+          ]);
+          assert.deepEqual(m.worker.invalidos, []);
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  });
 });
