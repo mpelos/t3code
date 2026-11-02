@@ -3,7 +3,7 @@
  * The Editaii connector's durable memory: deliveries, jobs, pending requests and the events owed
  * to the Worker. It lives in its own SQLite file, apart from the T3's database, and owns every
  * transition: each operation reads, decides and writes in one transaction, so the connector never
- * reads state, decides and saves. Design: tmp/conector-2b.md in the editaii repository.
+ * reads state, decides and saves. See docs/conector-t3.md in the editaii repository.
  */
 import * as NodeCrypto from "node:crypto";
 

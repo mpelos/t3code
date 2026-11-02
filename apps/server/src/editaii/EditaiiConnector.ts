@@ -1,8 +1,8 @@
 /**
  * Carries Editaii work to the T3 and the T3's facts back, for the connected machine. It
  * coordinates I/O only: every decision is a journal transition (EditaiiJournal.ts), and every
- * T3 effect goes through the adapter (EditaiiT3Adapter.ts). Design: tmp/conector-2b.md in the
- * editaii repository.
+ * T3 effect goes through the adapter (EditaiiT3Adapter.ts). How it works, its guarantees and
+ * limits: docs/conector-t3.md in the editaii repository.
  */
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
