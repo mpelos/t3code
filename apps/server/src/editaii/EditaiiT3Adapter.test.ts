@@ -649,9 +649,22 @@ it.effect(
             "unknown",
           );
           assert.isTrue(Option.isNone(yield* receipts.getByCommandId(missingCommand)));
+          // Inspection only reads: an answer never sent is absent, and stays unsent.
+          assert.deepEqual(yield* adapter.inspectAnswer(answer), { type: "absent" });
+          assert.isTrue(Option.isNone(yield* receipts.getByCommandId(answer.commandId)));
           assert.deepEqual(yield* adapter.respond(answer), {
             type: "accepted",
             commandId: answer.commandId,
+          });
+          assert.deepEqual(yield* adapter.inspectAnswer(answer), {
+            type: "found",
+            commandId: answer.commandId,
+          });
+          // The id belongs to another kind of command: not this answer.
+          const [launch] = acceptance.commandIds;
+          if (launch === undefined) throw new Error("expected the launch command");
+          assert.deepEqual(yield* adapter.inspectAnswer({ ...answer, commandId: launch }), {
+            type: "mismatch",
           });
           assert.deepEqual(yield* adapter.respond(answer), {
             type: "accepted",

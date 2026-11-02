@@ -152,6 +152,10 @@ export type Observation = Origin &
       }
     | { readonly type: "thread_lost"; readonly reason: MismatchReason | "cursor" }
   );
+export type AnswerInspection =
+  | { readonly type: "found"; readonly commandId: CommandId }
+  | { readonly type: "absent" }
+  | { readonly type: "mismatch" };
 export type AnswerResult =
   | { readonly type: "accepted"; readonly commandId: CommandId }
   | { readonly type: "superseded" }
@@ -189,6 +193,11 @@ export class EditaiiT3Adapter extends Context.Service<
      * incomplete answer permanently, and that comes back as `unknown`.
      */
     readonly respond: (plan: AnswerPlan) => Effect.Effect<AnswerResult>;
+    /**
+     * Whether T3 took this answer, by its command receipt, without writing anything. After an
+     * interrupted `respond`, only this may decide: an absent answer then means uncertainty.
+     */
+    readonly inspectAnswer: (plan: AnswerPlan) => Effect.Effect<AnswerInspection, T3ReadError>;
   }
 >()("t3/editaii/EditaiiT3Adapter") {}
 
@@ -458,6 +467,17 @@ const make = Effect.gen(function* () {
       }),
     );
 
+  const inspectAnswer = Effect.fn("EditaiiT3Adapter.inspectAnswer")(function* (
+    plan: AnswerPlan,
+  ): Effect.fn.Return<AnswerInspection, T3ReadError> {
+    const prior = yield* receipt(plan.threadId, plan.commandId);
+    if (Option.isNone(prior)) return { type: "absent" };
+    return prior.value.status === "accepted" &&
+      prior.value.threadId === plan.threadId &&
+      prior.value.commandType === "runtime-request.respond"
+      ? { type: "found", commandId: plan.commandId }
+      : { type: "mismatch" };
+  });
   const respond = Effect.fn("EditaiiT3Adapter.respond")(function* (plan: AnswerPlan) {
     return yield* Effect.uninterruptibleMask((restore) =>
       restore(
@@ -465,17 +485,12 @@ const make = Effect.gen(function* () {
           AnswerResult,
           T3ReadError | Orchestrator.OrchestratorV2Error
         > {
-          const prior = yield* receipt(plan.threadId, plan.commandId);
-          if (Option.isSome(prior)) {
-            if (
-              prior.value.status === "accepted" &&
-              prior.value.threadId === plan.threadId &&
-              prior.value.commandType === "runtime-request.respond"
-            )
-              return { type: "accepted", commandId: plan.commandId };
+          const prior = yield* inspectAnswer(plan);
+          if (prior.type === "found") return { type: "accepted", commandId: plan.commandId };
+          if (prior.type === "mismatch") {
             return {
               type: "unknown",
-              error: new RespondUnknown({ commandId: plan.commandId, cause: prior.value }),
+              error: new RespondUnknown({ commandId: plan.commandId, cause: prior }),
             };
           }
           const state = yield* snapshot(plan.threadId);
@@ -510,7 +525,7 @@ const make = Effect.gen(function* () {
       ),
     );
   });
-  return EditaiiT3Adapter.of({ accept, inspect, observe, respond });
+  return EditaiiT3Adapter.of({ accept, inspect, observe, respond, inspectAnswer });
 });
 
 const ENDED: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
