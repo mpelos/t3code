@@ -313,7 +313,7 @@ describe("EditaiiPainel", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("the connection and the activity shown always come from the same reading", () =>
+  it.effect("the connection, activity and configuration shown come from the same reading", () =>
     Effect.gen(function* () {
       const m = yield* maquina;
       yield* m.proximo;
@@ -328,10 +328,17 @@ describe("EditaiiPainel", () => {
           : Effect.succeed(vazia);
       yield* m.mexerNoJournal;
       yield* Deferred.await(lendo);
-      yield* SubscriptionRef.set(m.conexao, conectada("maquina-2"));
+      // Another machine and another project while the first one's activity is read.
+      const outro = ProjectId.make("projeto-2");
+      m.projetos.set(outro, { ...projeto, id: outro, title: "Contratos" });
+      yield* SubscriptionRef.set(m.conexao, { ...conectada("maquina-2"), projectId: outro });
       yield* Deferred.succeed(solta, undefined);
       const coerente = (p: EditaiiPanel) => {
         assert.strictEqual(p.activity?.link.machineId, p.connection.machine?.id);
+        assert.strictEqual(
+          p.configuration.type === "ready" ? p.configuration.projectId : null,
+          p.connection.projectId,
+        );
         return p.connection.machine?.id === "maquina-2";
       };
       yield* m.ate(coerente);

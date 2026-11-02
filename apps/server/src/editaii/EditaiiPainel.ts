@@ -10,6 +10,7 @@ import type {
   EditaiiJournalProblem,
   EditaiiLink,
   EditaiiPanel,
+  ProjectId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -96,23 +97,21 @@ const make = Effect.gen(function* () {
   const journal = yield* Journal.EditaiiJournal;
   const settings = yield* ServerSettings.ServerSettingsService;
   const eventos = yield* OrchestrationEventStore.OrchestrationEventStore;
-  const configuracao = Configuracao.resolver.pipe(
-    Effect.provide(
-      yield* Effect.context<
-        | Connection.EditaiiConnection
-        | ProjectService.ProjectService
-        | ServerSettings.ServerSettingsService
-      >(),
-    ),
-    Effect.catchTags({
-      EditaiiConfiguracaoIlegivel: (error) =>
-        Effect.logWarning("Editaii panel could not read the T3 settings", error).pipe(
-          Effect.as<EditaiiConfiguration>({ type: "unavailable", reason: "read_error" }),
-        ),
-    }),
-  );
+  const contexto = yield* Effect.context<
+    ProjectService.ProjectService | ServerSettings.ServerSettingsService
+  >();
+  const configuracao = (projectId: ProjectId | null) =>
+    Configuracao.resolver(projectId).pipe(
+      Effect.provide(contexto),
+      Effect.catchTags({
+        EditaiiConfiguracaoIlegivel: (error) =>
+          Effect.logWarning("Editaii panel could not read the T3 settings", error).pipe(
+            Effect.as<EditaiiConfiguration>({ type: "unavailable", reason: "read_error" }),
+          ),
+      }),
+    );
 
-  /** One reading of the whole panel; the activity is read for the link this connection shows. */
+  /** One reading of the whole panel; activity and configuration follow this one connection state. */
   const ler = Effect.fn("EditaiiPainel.ler")(function* (problema: EditaiiJournalProblem | null) {
     const estado = yield* connection.state;
     const v = Connection.vinculoDo(estado);
@@ -132,7 +131,7 @@ const make = Effect.gen(function* () {
           );
     return {
       connection: estado,
-      configuration: yield* configuracao,
+      configuration: yield* configuracao(estado.projectId),
       connector: { journal: problema },
       activity,
     } satisfies EditaiiPanel;

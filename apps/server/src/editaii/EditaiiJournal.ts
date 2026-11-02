@@ -502,12 +502,17 @@ const operacoes = (
     (nome: string) =>
     <E>(e: E) =>
       isJournalError(e) || isConfiguracaoIlegivel(e) ? e : storage(nome)(e);
-  /** One domain operation, one transaction. */
+  /**
+   * One domain operation, one transaction. Only its body can be interrupted: what commits is
+   * always signalled, so the panel never misses a change.
+   */
   const transacao = <A, E>(nome: string, efeito: Effect.Effect<A, E>) =>
-    efeito.pipe(
-      sql.withTransaction,
-      Effect.mapError(comoErro(nome)),
-      Effect.tap(() => gravou),
+    Effect.uninterruptibleMask((restore) =>
+      restore(efeito).pipe(
+        sql.withTransaction,
+        Effect.mapError(comoErro(nome)),
+        Effect.tap(() => gravou),
+      ),
     );
   /** A consistent read, which changes nothing and signals nothing. */
   const leitura = <A, E>(nome: string, efeito: Effect.Effect<A, E>) =>
@@ -1189,21 +1194,20 @@ const operacoes = (
             reciboPendente,
           });
         }
-        const conversasBloqueadas = yield* sql<{
+        const bloqueadas = yield* sql<{
           readonly conversa_id: string;
           readonly thread_associada: string | null;
-          readonly bloqueio: "conflito" | "thread_perdida";
+          readonly bloqueio: string;
         }>`SELECT conversa_id, thread_associada, bloqueio FROM conversas
            WHERE vinculo = ${k} AND bloqueio IS NOT NULL ORDER BY rowid`;
-        return {
-          desligando: abandonando,
-          trabalhos,
-          conversasBloqueadas: conversasBloqueadas.map((c) => ({
+        const conversasBloqueadas: Array<Situacao["conversasBloqueadas"][number]> = [];
+        for (const c of bloqueadas)
+          conversasBloqueadas.push({
             conversaId: c.conversa_id,
             threadId: c.thread_associada,
-            bloqueio: c.bloqueio,
-          })),
-        } satisfies Situacao;
+            bloqueio: (yield* bloqueioJson.decode(c.bloqueio)).motivo,
+          });
+        return { desligando: abandonando, trabalhos, conversasBloqueadas } satisfies Situacao;
       }),
     );
   };

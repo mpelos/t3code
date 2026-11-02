@@ -6,6 +6,7 @@
 import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   type EditaiiConfiguration,
+  type ProjectId,
   resolveProjectProviderInstanceEnabled,
 } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -22,25 +23,23 @@ export type Resolvida = Exclude<EditaiiConfiguration, { readonly type: "unavaila
 const ilegivel = (cause: unknown) => new Journal.EditaiiConfiguracaoIlegivel({ cause });
 
 /**
- * What a new conversation would run with now. What is missing or off is `incomplete`, with the
- * reason; settings or projects that cannot be read are `EditaiiConfiguracaoIlegivel`.
+ * What a new conversation would run with now in `projectId`, the project chosen in the panel. What
+ * is missing or off is `incomplete`, with the reason; settings or projects that cannot be read are
+ * `EditaiiConfiguracaoIlegivel`.
  */
-export const resolver = Effect.gen(function* () {
-  const { projectId } = yield* Connection.EditaiiConnection.use((c) => c.state);
+export const resolver = Effect.fn("EditaiiConfiguracao.resolver")(function* (
+  projectId: ProjectId | null,
+) {
   if (projectId === null)
     return { type: "incomplete", reason: "no_project", projectTitle: null } satisfies Resolvida;
-  const project = yield* ProjectService.ProjectService.use((p) => p.getById(projectId)).pipe(
-    Effect.mapError(ilegivel),
-  );
+  const project = yield* ProjectService.ProjectService.use((p) => p.getById(projectId));
   if (Option.isNone(project))
     return {
       type: "incomplete",
       reason: "project_missing",
       projectTitle: null,
     } satisfies Resolvida;
-  const settings = yield* ServerSettings.ServerSettingsService.use((s) => s.getSettings).pipe(
-    Effect.mapError(ilegivel),
-  );
+  const settings = yield* ServerSettings.ServerSettingsService.use((s) => s.getSettings);
   const efetivas = resolveProjectSettings(settings, projectId, project.value).settings;
   const projectTitle = project.value.title;
   const modelSelection = efetivas.defaultModelSelection;
@@ -55,7 +54,7 @@ export const resolver = Effect.gen(function* () {
     modelSelection,
     runtimeMode: efetivas.defaultRuntimeMode,
   } satisfies Resolvida;
-});
+}, Effect.mapError(ilegivel));
 
 /** What the person in the Editaii reads when a request cannot start its thread. */
 const motivo = (c: Extract<Resolvida, { readonly type: "incomplete" }>): string => {
@@ -71,8 +70,9 @@ const motivo = (c: Extract<Resolvida, { readonly type: "incomplete" }>): string 
   }
 };
 
-/** Read when a request starts a thread: `resolver`, as the journal takes it. */
-export const ler = resolver.pipe(
+/** Read when a request starts a thread: `resolver` for the chosen project, as the journal takes it. */
+export const ler = Connection.EditaiiConnection.use((c) => c.state).pipe(
+  Effect.flatMap(({ projectId }) => resolver(projectId)),
   Effect.map((c): Journal.Configuracao =>
     c.type === "incomplete"
       ? { type: "indisponivel", motivo: motivo(c) }

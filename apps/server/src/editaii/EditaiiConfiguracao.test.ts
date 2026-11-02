@@ -71,7 +71,7 @@ const naMaquina = <A, E, R>(
 const ler = (escolhido: ProjectId | null, options: Parameters<typeof naMaquina>[2] = {}) =>
   naMaquina(Configuracao.ler, escolhido, options);
 const resolver = (escolhido: ProjectId | null, options: Parameters<typeof naMaquina>[2] = {}) =>
-  naMaquina(Configuracao.resolver, escolhido, options);
+  naMaquina(Configuracao.resolver(escolhido), escolhido, options);
 
 describe("EditaiiConfiguracao", () => {
   it.effect("runs new conversations with what the T3 resolves for the chosen project", () =>

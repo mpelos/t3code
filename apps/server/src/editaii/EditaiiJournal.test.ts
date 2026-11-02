@@ -1058,6 +1058,39 @@ describe("EditaiiJournal situation", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect(
+    "says why each conversation is blocked, and a reason it cannot read is invalid data",
+    () =>
+      Effect.gen(function* () {
+        const a = yield* ambiente;
+        yield* usar(a, (j) =>
+          Effect.gen(function* () {
+            // The T3 went back to before an answer: its thread is lost.
+            yield* iniciar(j);
+            yield* j.observar(V1, "trabalho-1", question("X"));
+            yield* j.observar(V1, "trabalho-1", resolved("X"));
+            yield* j.observar(V1, "trabalho-1", question("X", "message"));
+            // The Worker refused its receipt: the conversation conflicts.
+            const dois = planoDoPedido(
+              yield* j.receber(V1, pedido(2, { id: "conversa-2" }), pronta),
+            );
+            yield* j.resolver(V1, "entrega-2", { tipo: "aceita", aceitacao: aceitacao(dois) });
+            yield* j.confirmada(V1, "entrega-2", "conflito");
+            assert.deepEqual(
+              (yield* j.situacao(V1)).conversasBloqueadas.map((c) => [c.conversaId, c.bloqueio]),
+              [
+                ["conversa-1", "thread_perdida"],
+                ["conversa-2", "conflito"],
+              ],
+            );
+          }),
+        );
+        preparar(a.stateDir, a.arquivo, "UPDATE conversas SET bloqueio = 'conflito'");
+        const erro = yield* usar(a, (j) => Effect.flip(j.situacao(V1)));
+        assert.strictEqual(erro.reason, "invalid_data");
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("once the link is being abandoned, its jobs owe the Worker nothing more", () =>
     Effect.gen(function* () {
       const a = yield* ambiente;
