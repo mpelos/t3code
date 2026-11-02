@@ -849,6 +849,25 @@ it.effect(
     ),
 );
 
+it.effect("a conversation whose T3 thread is gone is told so, with nothing dispatched", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* harness("editaii-thread-missing");
+      yield* Effect.gen(function* () {
+        const adapter = yield* Adapter.EditaiiT3Adapter;
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const before = yield* engine.getThreadEventSequence(ThreadId.make("missing"));
+        const outcome = yield* adapter.accept(plan("missing", false)).pipe(Effect.result);
+        assert.equal(outcome._tag, "Failure");
+        if (outcome._tag === "Failure")
+          assert.equal(outcome.failure._tag, "EditaiiT3ThreadMissing");
+        assert.deepEqual(yield* engine.getThreadEventSequence(ThreadId.make("missing")), before);
+        assert.deepEqual(yield* adapter.inspect(plan("missing", false), null), { type: "absent" });
+      }).pipe(Effect.provide(h.layer));
+    }),
+  ),
+);
+
 it.effect("distinguishes a permanent rejection from an unreadable acceptance", () =>
   Effect.scoped(
     Effect.gen(function* () {

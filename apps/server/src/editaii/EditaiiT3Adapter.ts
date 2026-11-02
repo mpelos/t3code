@@ -43,6 +43,14 @@ export class AcceptUnknown extends Schema.TaggedError<AcceptUnknown>()("EditaiiT
     return "The T3 request outcome could not be established.";
   }
 }
+// The conversation's T3 thread no longer exists; nothing was dispatched. The connector reports the thread lost.
+export class ThreadMissing extends Schema.TaggedError<ThreadMissing>()("EditaiiT3ThreadMissing", {
+  threadId: ThreadId,
+}) {
+  override get message(): string {
+    return "The conversation's T3 thread no longer exists.";
+  }
+}
 export class T3ReadError extends Schema.TaggedError<T3ReadError>()("EditaiiT3ReadError", {
   threadId: ThreadId,
   cause: Schema.Defect(),
@@ -151,9 +159,13 @@ export type AnswerResult =
 export class EditaiiT3Adapter extends Context.Service<
   EditaiiT3Adapter,
   {
+    /**
+     * Executes the plan. Call it only while the journal says the invocation has not started; after
+     * that, only `inspect` may decide: an absent acceptance then means uncertainty, never a retry.
+     */
     readonly accept: (
       plan: RequestPlan,
-    ) => Effect.Effect<Acceptance, AcceptRefused | AcceptUnknown>;
+    ) => Effect.Effect<Acceptance, AcceptRefused | AcceptUnknown | ThreadMissing>;
     readonly inspect: (
       plan: RequestPlan,
       known: Acceptance | null,
@@ -177,6 +189,7 @@ const commandsFor = (plan: RequestPlan) =>
 
 const isReadError = Schema.is(T3ReadError);
 const isRefused = Schema.is(AcceptRefused);
+const isThreadMissing = Schema.is(ThreadMissing);
 const isLiveBufferError = Schema.is(LiveStreamBufferError);
 const isDomainStreamError = Schema.is(Orchestrator.OrchestratorDomainEventStreamError);
 const isSinkStreamError = Schema.is(EventSinkStreamError);
@@ -311,11 +324,8 @@ const make = Effect.gen(function* () {
               });
             } else {
               const shell = yield* engine.getThreadShell(plan.threadId);
-              if (shell === null)
-                return yield* new AcceptUnknown({
-                  commandId: plan.commandId,
-                  cause: { reason: "thread-missing" },
-                });
+              if (shell === null || shell.deletedAt !== null)
+                return yield* new ThreadMissing({ threadId: plan.threadId });
               yield* threads.sendToThread({
                 projectId: shell.projectId,
                 threadId: plan.threadId,
@@ -336,7 +346,8 @@ const make = Effect.gen(function* () {
         ).pipe(Effect.exit);
         if (result._tag === "Success") return result.value;
         const reason = Cause.findErrorOption(result.cause);
-        if (Option.isSome(reason) && isRefused(reason.value)) return yield* reason.value;
+        if (Option.isSome(reason) && (isRefused(reason.value) || isThreadMissing(reason.value)))
+          return yield* reason.value;
         const rejected = yield* refused(plan).pipe(Effect.orElseSucceed(() => false));
         if (rejected && !Cause.hasInterrupts(result.cause))
           return yield* new AcceptRefused({ commandId: plan.commandId });
