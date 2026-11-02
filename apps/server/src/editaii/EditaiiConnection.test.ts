@@ -912,6 +912,36 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
     }),
   );
 
+  it.effect("an answer is either options or text, never both", () =>
+    Effect.gen(function* () {
+      const resposta = (dada: unknown) => ({
+        versao: 1,
+        entrega_id: "resposta",
+        tipo: "resposta",
+        trabalho_id: "trabalho",
+        conversa: ENTREGA.conversa,
+        intervencao: { id: "intervencao", referencia: "pedido-t3", respostas: { p1: dada } },
+      });
+      for (const [dada, aceita] of [
+        [{ opcoes: ["1"] }, true],
+        [{ texto: "Livre" }, true],
+        [{ opcoes: ["1"], texto: "Livre" }, false],
+        [{ opcoes: [], texto: "Livre" }, false],
+      ] as const) {
+        const h = yield* harness({
+          initial: CONNECTED,
+          reply: () => Effect.succeed(Response.json({ entrega: resposta(dada) })),
+        });
+        yield* h.connection.withSession((session) =>
+          Effect.gen(function* () {
+            if (aceita) expect(yield* session.proxima).toEqual(resposta(dada));
+            else expect((yield* session.proxima.pipe(Effect.flip)).reason).toBe("protocol");
+          }),
+        );
+      }
+    }),
+  );
+
   it.effect("the work's own failure ends the session call with that failure", () =>
     Effect.gen(function* () {
       const h = yield* harness({ initial: CONNECTED });

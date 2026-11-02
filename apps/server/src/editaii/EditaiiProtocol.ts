@@ -16,10 +16,13 @@ export const Conversa = Schema.Struct({
 });
 export type Conversa = typeof Conversa.Type;
 
-/** What the person did for one question: picked options, by id, or wrote their own words. */
+/**
+ * What the person did for one question: picked options, by id, or wrote their own words. Exactly
+ * one of the two: an answer carrying both is outside the protocol, not a choice to make here.
+ */
 export const Resposta = Schema.Union([
-  Schema.Struct({ opcoes: Schema.NonEmptyArray(Id) }),
-  Schema.Struct({ texto: Id }),
+  Schema.Struct({ opcoes: Schema.NonEmptyArray(Id), texto: Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ texto: Id, opcoes: Schema.optionalKey(Schema.Never) }),
 ]);
 export type Resposta = typeof Resposta.Type;
 

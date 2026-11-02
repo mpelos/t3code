@@ -63,7 +63,7 @@ export function answersFor(traducao: Traducao, respostas: Protocol.Respostas): T
     const resposta = Object.hasOwn(respostas, pergunta.id) ? respostas[pergunta.id] : undefined;
     const destino = traducao.destinos[pergunta.id];
     if (resposta === undefined || destino === undefined) return null;
-    if ("texto" in resposta) {
+    if (resposta.texto !== undefined) {
       if (!pergunta.livre) return null;
       answers.push([destino.questionId, resposta.texto]);
       continue;
