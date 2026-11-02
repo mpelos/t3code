@@ -125,6 +125,7 @@ describe("EditaiiConnector over the real T3", () => {
       assert.strictEqual(intervencao?.tipo, "intervencao");
       if (intervencao?.tipo !== "intervencao") return;
       const [pergunta] = intervencao.perguntas;
+      assert.deepInclude(pergunta, { titulo: "Proposta", pergunta: "Qual caminho?" });
       assert.deepEqual(
         pergunta?.opcoes.map((o) => o.rotulo),
         ["Sim", "Sim"],
@@ -165,6 +166,117 @@ describe("EditaiiConnector over the real T3", () => {
   );
 
   it.effect(
+    "an approval is an action in the T3: once given there, the job goes on to its end",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* T3.harness("editaii-connector-aprovacao");
+        const m = yield* Maquinas.make(configuracao);
+        const t3 = yield* m.ligar(h.layer);
+        const worker = Context.get(t3.context, Worker.OrchestrationEffectWorkerV2);
+        const liberado = yield* noT3(t3)(h.release());
+        m.worker.pedir(1);
+        const turn = yield* noT3(t3)(h.beginTurn(liberado));
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+
+        const aprovacao = yield* noT3(t3)(h.question(turn, "approval", "a"));
+        yield* m.quando(() => m.worker.estado(1) === "acao_no_t3");
+        // The person approves in the T3, as its interface does.
+        yield* noT3(t3)(
+          Orchestrator.OrchestratorV2.use((engine) =>
+            engine.dispatch({
+              type: "runtime-request.respond",
+              commandId: CommandId.make("aprovada-no-t3"),
+              threadId: turn.threadId,
+              requestId: aprovacao,
+              decision: "accept",
+            }),
+          ),
+        );
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+        yield* worker.drain();
+        assert.deepEqual(
+          h.responses.map((r) => r.decision),
+          ["accept"],
+        );
+
+        yield* noT3(t3)(h.finish(turn, "Feito, com a aprovação."));
+        yield* m.quando(() => m.worker.estado(1) === "concluido");
+        assert.deepEqual(Maquinas.tipos(m.worker.aplicados), [
+          "trabalho-1:1:acao_necessaria",
+          "trabalho-1:2:retomado",
+          "trabalho-1:3:resposta",
+        ]);
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "a question answered in the T3 first: the Editaii's answer calls nothing, and the next stays open",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* T3.harness("editaii-connector-superada");
+        const m = yield* Maquinas.make(configuracao);
+        const chamadas = { accept: 0, respond: 0 };
+        const t3 = yield* m.ligar(contando(chamadas).pipe(Layer.provideMerge(h.layer)));
+        const worker = Context.get(t3.context, Worker.OrchestrationEffectWorkerV2);
+        const liberado = yield* noT3(t3)(h.release());
+        m.worker.pedir(1);
+        const turn = yield* noT3(t3)(h.beginTurn(liberado));
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+        const caminho = (id: string) => ({
+          id,
+          header: "Caminho",
+          question: "Qual caminho?",
+          options: [],
+          allowCustomAnswer: true,
+        });
+
+        const pergunta = yield* noT3(t3)(h.question(turn, "question", "x", [caminho("x")]));
+        yield* m.quando(() => m.worker.estado(1) === "aguardando_pessoa");
+        const [intervencao] = m.worker.aplicados;
+        if (intervencao?.tipo !== "intervencao") return assert.fail("expected the intervention");
+        // The end of the wait is held from the Worker, which still serves the Editaii's answer.
+        const retomado = yield* Maquinas.travarEventos(m, (e) => e.tipo === "retomado");
+        const eventos = () => m.worker.chamadas.filter((c) => c === "maquina/eventos").length;
+        const antes = eventos();
+        yield* noT3(t3)(
+          Orchestrator.OrchestratorV2.use((engine) =>
+            engine.dispatch({
+              type: "runtime-request.respond",
+              commandId: CommandId.make("respondida-no-t3"),
+              threadId: turn.threadId,
+              requestId: pergunta,
+              answers: { x: "pela T3" },
+            }),
+          ),
+        );
+        // The journal saw the T3 close it: the end of the wait is on its way.
+        yield* m.quando(() => eventos() > antes);
+        m.worker.responder(1, { [intervencao.perguntas[0]?.id ?? ""]: { texto: "pelo Editaii" } });
+        // Settled without a receipt, the delivery waits for the event the Worker is owed.
+        yield* m.pausa;
+        yield* Deferred.succeed(retomado, undefined);
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+        yield* worker.drain();
+        assert.deepEqual(chamadas, { accept: 1, respond: 0 });
+        assert.deepEqual(
+          h.responses.map((r) => r.answers),
+          [{ x: "pela T3" }],
+        );
+
+        yield* noT3(t3)(h.question(turn, "question", "y", [caminho("y")]));
+        yield* m.quando(() => m.worker.estado(1) === "aguardando_pessoa");
+        assert.deepEqual(Maquinas.tipos(m.worker.aplicados), [
+          "trabalho-1:1:intervencao",
+          "trabalho-1:2:retomado",
+          "trabalho-1:3:intervencao",
+        ]);
+        assert.strictEqual(m.worker.confirmacoes.length, 1);
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
     "a T3 restart with a question pending: it is answered by message, and the job ends",
     () =>
       Effect.gen(function* () {
@@ -197,6 +309,8 @@ describe("EditaiiConnector over the real T3", () => {
         const continuacao = yield* noT3(depois)(h.nextTurn());
         assert.notStrictEqual(continuacao.runId, turn.runId);
         assert.deepEqual(h.responses, []);
+        for (const p of intervencao.perguntas)
+          assert.include(continuacao.message.text, `sim, ${p.id}`);
 
         yield* noT3(depois)(h.finish(continuacao, "Pronto, com a resposta por mensagem."));
         yield* m.quando(() => m.worker.estado(1) === "concluido");
