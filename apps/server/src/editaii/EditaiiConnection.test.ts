@@ -14,6 +14,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Scheduler from "effect/Scheduler";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -938,6 +939,91 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       yield* Fiber.interrupt(using);
       expect(yield* Deferred.isDone(ended)).toBe(true);
       expect((yield* h.connection.state).status).toBe("connected");
+    }),
+  );
+
+  it.effect("the session's work owns its scope: a disconnect releases what it acquired", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({ initial: CONNECTED });
+      const ready = yield* Deferred.make<void>();
+      const released = yield* Deferred.make<void>();
+      const helperEnded = yield* Deferred.make<void>();
+      const using = yield* h.connection
+        .withSession(() =>
+          Effect.gen(function* () {
+            yield* Effect.acquireRelease(Effect.void, () => Deferred.succeed(released, undefined));
+            // The helper reports in before the work does, so it is running when the session ends.
+            yield* Deferred.succeed(ready, undefined).pipe(
+              Effect.andThen(Effect.never),
+              Effect.ensuring(Deferred.succeed(helperEnded, undefined)),
+              Effect.forkScoped,
+            );
+            return yield* Effect.never;
+          }),
+        )
+        .pipe(Effect.scoped, Effect.forkChild);
+      yield* Deferred.await(ready);
+      yield* h.connection.disconnect();
+      expect(yield* Deferred.isDone(released)).toBe(true);
+      expect(yield* Deferred.isDone(helperEnded)).toBe(true);
+      yield* Fiber.join(using);
+    }),
+  );
+
+  it.effect("a caller interrupted right after the work is forked still stops the work", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({ initial: CONNECTED });
+      const base = yield* Scheduler.Scheduler;
+      // Interrupts the caller when it schedules the work's start, before it can wait on the work.
+      let onSchedule: (() => void) | undefined;
+      const scheduler: Scheduler.Scheduler = {
+        executionMode: base.executionMode,
+        shouldYield: (fiber) => base.shouldYield(fiber),
+        makeDispatcher: () => {
+          const dispatcher = base.makeDispatcher();
+          return {
+            scheduleTask: (task, priority) => {
+              const hook = onSchedule;
+              onSchedule = undefined;
+              hook?.();
+              dispatcher.scheduleTask(task, priority);
+            },
+            flush: () => dispatcher.flush(),
+          };
+        },
+      };
+      const started = yield* Deferred.make<void>();
+      const ended = yield* Deferred.make<void>();
+      let caller: Fiber.Fiber<void> | undefined;
+      caller = yield* h.connection
+        .withSession(() => {
+          onSchedule = () => caller?.interruptUnsafe();
+          return Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(Effect.never),
+            Effect.ensuring(Deferred.succeed(ended, undefined)),
+          );
+        })
+        .pipe(Effect.forkChild, Effect.provideService(Scheduler.Scheduler, scheduler));
+      expect(Exit.hasInterrupts(yield* Fiber.await(caller))).toBe(true);
+      yield* Effect.yieldNow;
+      if (yield* Deferred.isDone(started)) expect(yield* Deferred.isDone(ended)).toBe(true);
+    }),
+  );
+
+  it.effect("events count as sent only when the Worker applied all of them", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({
+        initial: CONNECTED,
+        reply: () => Effect.succeed(Response.json({ aplicados: 0 })),
+      });
+      yield* h.connection.withSession((session) =>
+        Effect.gen(function* () {
+          const failure = yield* session
+            .eventos([{ id: "event", trabalho_id: "trabalho", sequencia: 1, tipo: "retomado" }])
+            .pipe(Effect.flip);
+          expect(failure.reason).toBe("protocol");
+        }),
+      );
     }),
   );
 });

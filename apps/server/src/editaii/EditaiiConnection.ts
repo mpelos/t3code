@@ -114,7 +114,6 @@ const decodeProxima = Schema.decodeUnknownEffect(
   Schema.Struct({ entrega: Schema.NullOr(Protocol.Entrega) }),
 );
 const decodeConfirmado = Schema.decodeUnknownEffect(Schema.Struct({ ok: Schema.Literal(true) }));
-const decodeAplicados = Schema.decodeUnknownEffect(Schema.Struct({ aplicados: Schema.Number }));
 
 /** Who this machine is to the Editaii. The connector keeps its local work per link. */
 export interface EditaiiVinculo {
@@ -154,13 +153,13 @@ export class EditaiiConnection extends Context.Service<
     readonly reopenBrowser: () => Effect.Effect<void, EditaiiConnectionError>;
     readonly disconnect: () => Effect.Effect<void, EditaiiConnectionError>;
     /**
-     * Runs `usar` with the session of the next connected period, in a scope the connection owns,
-     * and returns when `usar` ends or the session does: disconnecting interrupts `usar` and waits
-     * for it.
+     * Runs `usar` with the session of the next connected period, in a scope of its own that the
+     * connection owns, and returns when `usar` ends or the session does. Disconnecting, or
+     * interrupting the caller, interrupts `usar`, releases what it acquired and waits for it.
      */
     readonly withSession: <E, R>(
       usar: (session: EditaiiSession) => Effect.Effect<void, E, R>,
-    ) => Effect.Effect<void, E, R>;
+    ) => Effect.Effect<void, E, Exclude<R, Scope.Scope>>;
   }
 >()("t3/editaii/EditaiiConnection") {}
 
@@ -362,8 +361,13 @@ const make = Effect.gen(function* () {
           { recibo },
           decodeConfirmado,
         ).pipe(Effect.asVoid),
+      // The Worker answers with the batch size, repeats included; anything else is no receipt.
       eventos: (eventos) =>
-        sessionCall("maquina/eventos", { eventos }, decodeAplicados).pipe(Effect.asVoid),
+        sessionCall(
+          "maquina/eventos",
+          { eventos },
+          Schema.decodeUnknownEffect(Schema.Struct({ aplicados: Schema.Literal(eventos.length) })),
+        ).pipe(Effect.asVoid),
     };
     yield* SubscriptionRef.set(active, {
       scope,
@@ -748,9 +752,13 @@ const make = Effect.gen(function* () {
       Stream.runHead,
     );
     if (Option.isNone(current)) return;
-    // A scope that closed after this read interrupts the fork before `usar` starts.
-    const fiber = yield* usar(current.value.session).pipe(Effect.forkIn(current.value.scope));
-    const exit = yield* Fiber.await(fiber).pipe(Effect.onInterrupt(() => Fiber.interrupt(fiber)));
+    // A scope that closed after this read interrupts the fork before `usar` starts. Forking and
+    // arming the release are one step, so no interruption of the caller falls between them.
+    const exit = yield* Effect.acquireUseRelease(
+      usar(current.value.session).pipe(Effect.scoped, Effect.forkIn(current.value.scope)),
+      Fiber.await,
+      Fiber.interrupt,
+    );
     if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause))
       return yield* Effect.failCause(exit.cause);
   });
