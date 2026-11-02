@@ -14,10 +14,13 @@ import {
   RuntimeRequestId,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
@@ -111,11 +114,36 @@ interface Trabalho {
 }
 
 /**
+ * Tells the test that something changed, so it waits for the state it expects without polling:
+ * `ate` checks, and checks again only after the next change.
+ */
+const sinal = () => {
+  let proxima = Deferred.makeUnsafe<void>();
+  const ate = <A>(valor: () => A | null | undefined): Effect.Effect<A> =>
+    Effect.suspend(() => {
+      const v = valor();
+      if (v !== null && v !== undefined) return Effect.succeed(v);
+      return Deferred.await(proxima).pipe(Effect.andThen(ate(valor)));
+    });
+  return {
+    avisar: () => {
+      const mudou = proxima;
+      proxima = Deferred.makeUnsafe<void>();
+      Deferred.doneUnsafe(mudou, Effect.void);
+    },
+    ate,
+    quando: (condicao: () => boolean) => ate(() => condicao() || undefined).pipe(Effect.asVoid),
+  };
+};
+type Sinal = ReturnType<typeof sinal>;
+
+/**
  * The Worker's side of docs/protocolo-maquinas.md, as strict as the real one (src/trabalhos.ts in
  * the editaii repository). Every event it refuses for breaking the protocol is kept in
- * `invalidos`, so a test can assert the connector never sent one.
+ * `invalidos`, so a test can assert the connector never sent one. A poll is answered once there is
+ * work, so no test depends on the poll interval.
  */
-const fakeWorker = () => {
+const fakeWorker = (mudou: Sinal) => {
   const trabalhos = new Map<string, Trabalho>();
   const conversas = new Map<string, { thread: string | null; parada: boolean }>();
   const entregas: Array<{ readonly entrega: Protocol.Entrega; recibo: string | null }> = [];
@@ -128,8 +156,8 @@ const fakeWorker = () => {
     aplicados: [] as Array<Protocol.Evento>,
     invalidos: [] as Array<{ readonly evento: Protocol.Evento; readonly motivo: string }>,
     recusados: [] as Array<Protocol.Evento>,
-    /** While set, a receipt waits for it before reaching the Worker. */
-    travarConfirmacao: null as Deferred.Deferred<void> | null,
+    /** A receipt for which this gives a gate waits for it before reaching the Worker. */
+    travarRecibo: (_entregaId: string): Deferred.Deferred<void> | undefined => undefined,
     /** The next call of this kind is applied, and its reply lost. */
     perderResposta: new Set<"confirmar" | "eventos">(),
     /** Deliveries whose receipt the Worker refuses, as when it names another thread. */
@@ -142,6 +170,7 @@ const fakeWorker = () => {
     pedir: (n: number, conversa = "conversa-1") => {
       trabalhos.set(`trabalho-${n}`, { n, conversa, estado: "aguardando", intervencao: null });
       if (!conversas.has(conversa)) conversas.set(conversa, { thread: null, parada: false });
+      mudou.avisar();
     },
     /** The person answers the job's open intervention in the Editaii. */
     responder: (n: number, respostas: Protocol.Respostas) => {
@@ -159,6 +188,7 @@ const fakeWorker = () => {
           intervencao: { id: t.intervencao.id, referencia: t.intervencao.referencia, respostas },
         },
       });
+      mudou.avisar();
     },
   };
   const trabalhoDe = (id: string) => {
@@ -291,18 +321,22 @@ const fakeWorker = () => {
     return 200;
   };
   const perdida = (tipo: "confirmar" | "eventos") => w.perderResposta.delete(tipo);
-  const reply = Effect.fn("test.fakeWorker.reply")(function* (
+  const atender = Effect.fn("test.fakeWorker.atender")(function* (
     request: HttpClientRequest.HttpClientRequest,
   ) {
     if (request.body._tag !== "Uint8Array") throw new Error("Expected a JSON request");
     const body = JSON.parse(new TextDecoder().decode(request.body.body));
     const path = new URL(request.url).pathname.replace(/^\/api\//, "");
     w.chamadas.push(path);
-    if (path === "maquina/entregas/proxima") return Response.json({ entrega: proxima() });
+    mudou.avisar();
+    if (path === "maquina/entregas/proxima")
+      return Response.json({ entrega: yield* mudou.ate(proxima) });
     const confirmacao = /^maquina\/entregas\/([^/]+)\/confirmar$/.exec(path)?.[1];
     if (confirmacao !== undefined) {
-      if (w.travarConfirmacao !== null) yield* Deferred.await(w.travarConfirmacao);
-      const status = confirmar(decodeURIComponent(confirmacao), body.recibo);
+      const entregaId = decodeURIComponent(confirmacao);
+      const trava = w.travarRecibo(entregaId);
+      if (trava !== undefined) yield* Deferred.await(trava);
+      const status = confirmar(entregaId, body.recibo);
       if (status === 200 && perdida("confirmar")) return new Response("lost", { status: 502 });
       return status === 200 ? Response.json({ ok: true }) : new Response("", { status });
     }
@@ -318,6 +352,9 @@ const fakeWorker = () => {
     }
     return new Response("", { status: 404 });
   });
+  // Whatever the Worker did, the test hears of it before the machine reads the reply.
+  const reply = (request: HttpClientRequest.HttpClientRequest) =>
+    atender(request).pipe(Effect.tap(() => Effect.sync(mudou.avisar)));
   return Object.assign(w, { reply });
 };
 
@@ -330,10 +367,11 @@ type Invocacao = "aceitar" | "recusar" | "travar_antes" | "travar_depois";
 
 /**
  * The T3 as the adapter shows it. An invocation may hang before or after it takes effect, as a
- * crash would leave it. Each accepted run is a log the test appends facts to; `observe` replays it
- * after the cursor and follows it to its final fact, as the real adapter does.
+ * crash would leave it. Each accepted run is a log the test appends facts to. Like the real
+ * adapter, `observe` shows the whole run again and then follows it to its final fact; a run whose
+ * thread is gone shows only that.
  */
-const fakeT3 = () => {
+const fakeT3 = (mudou: Sinal) => {
   const aceitos = new Map<string, Adapter.Acceptance>();
   const planos: Array<Adapter.RequestPlan> = [];
   const respostas = new Map<string, Adapter.AnswerPlan>();
@@ -341,6 +379,7 @@ const fakeT3 = () => {
     string,
     SubscriptionRef.SubscriptionRef<ReadonlyArray<Adapter.Observation>>
   >();
+  const perdidos = new Set<string>();
   let sequence = 0;
   const t = {
     chamadasAccept: 0,
@@ -356,18 +395,23 @@ const fakeT3 = () => {
     runs.set(runId, criado);
     return criado;
   });
-  /** Appends what the T3 did in the run of request `n`. */
-  const fato = Effect.fn("test.fakeT3.fato")(function* (n: number, f: (run: RunId) => Fato) {
+  const aceitacaoDe = (n: number) => {
     const plano = planos.find((p) => p.text.endsWith(`Pedido ${n}`));
     const aceitacao = plano === undefined ? undefined : aceitos.get(plano.commandId);
     if (aceitacao === undefined) throw new Error(`request ${n} was not accepted`);
+    return aceitacao;
+  };
+  /** Appends what the T3 did in the run of request `n`. */
+  const fato = Effect.fn("test.fakeT3.fato")(function* (n: number, f: (run: RunId) => Fato) {
+    const { runId } = aceitacaoDe(n);
     sequence += 1;
-    const observacao: Adapter.Observation = {
-      ...f(aceitacao.runId),
-      sequence,
-      key: `fato:${sequence}`,
-    };
-    yield* SubscriptionRef.update(yield* run(aceitacao.runId), (log) => [...log, observacao]);
+    const observacao: Adapter.Observation = { ...f(runId), sequence, key: `fato:${sequence}` };
+    yield* SubscriptionRef.update(yield* run(runId), (log) => [...log, observacao]);
+  });
+  /** The thread of request `n` is gone from the T3. */
+  const perder = Effect.fn("test.fakeT3.perder")(function* (n: number) {
+    perdidos.add(aceitacaoDe(n).runId);
+    yield* fato(n, () => ({ type: "thread_lost", reason: "thread" }));
   });
   const FINAIS: ReadonlyArray<Adapter.Observation["type"]> = ["answer", "failure", "thread_lost"];
   const adapter = Adapter.EditaiiT3Adapter.of({
@@ -375,18 +419,19 @@ const fakeT3 = () => {
       Effect.gen(function* () {
         t.chamadasAccept += 1;
         planos.push(plan);
-        if (t.aceitar === "recusar") {
-          return yield* new Adapter.AcceptRefused({ commandId: plan.commandId });
-        }
-        if (t.aceitar === "travar_antes") return yield* Effect.never;
         const aceitacao: Adapter.Acceptance = {
           threadId: plan.threadId,
           messageId: plan.messageId,
           runId: RunId.make(`run:${plan.commandId}`),
           commandIds: [plan.commandId],
         };
-        aceitos.set(plan.commandId, aceitacao);
-        if (t.aceitar === "travar_depois") return yield* Effect.never;
+        const toma = t.aceitar === "aceitar" || t.aceitar === "travar_depois";
+        if (toma) aceitos.set(plan.commandId, aceitacao);
+        mudou.avisar();
+        if (t.aceitar === "recusar") {
+          return yield* new Adapter.AcceptRefused({ commandId: plan.commandId });
+        }
+        if (t.aceitar !== "aceitar") return yield* Effect.never;
         return aceitacao;
       }),
     inspect: (plan) => {
@@ -398,7 +443,16 @@ const fakeT3 = () => {
     observe: (acceptance, after) =>
       Stream.unwrap(
         Effect.gen(function* () {
-          let visto = after ?? 0;
+          if (perdidos.has(acceptance.runId)) {
+            const perdida: Adapter.Observation = {
+              type: "thread_lost",
+              reason: "thread",
+              sequence: after ?? 0,
+              key: "lost:thread",
+            };
+            return Stream.succeed(perdida);
+          }
+          let visto = 0;
           return SubscriptionRef.changes(yield* run(acceptance.runId)).pipe(
             Stream.flatMap((log) => {
               const novos = log.filter((o) => o.sequence > visto);
@@ -412,10 +466,11 @@ const fakeT3 = () => {
     respond: (plan) =>
       Effect.gen(function* () {
         t.chamadasRespond += 1;
+        const toma = t.responder === "aceitar" || t.responder === "travar_depois";
+        if (toma) respostas.set(plan.commandId, plan);
+        mudou.avisar();
         if (t.responder === "recusar") return { type: "not_resumable" } as const;
-        if (t.responder === "travar_antes") return yield* Effect.never;
-        respostas.set(plan.commandId, plan);
-        if (t.responder === "travar_depois") return yield* Effect.never;
+        if (t.responder !== "aceitar") return yield* Effect.never;
         return { type: "accepted", commandId: plan.commandId } as const;
       }),
     inspectAnswer: (plan) =>
@@ -425,7 +480,7 @@ const fakeT3 = () => {
           : { type: "absent" },
       ),
   });
-  return { t, adapter, fato };
+  return { t, adapter, fato, perder };
 };
 
 const pergunta =
@@ -453,25 +508,53 @@ const resposta =
 // The fake T3's questions have no options, so the person writes the answer.
 const SIM: Protocol.Respostas = { p1: { texto: "Sim" } };
 
+/** The connector's pause before it tries again; the tests let it pass only once it has begun. */
+const PAUSA = Duration.seconds(5);
+
 /**
  * One machine: its saved connection, the journal's state dir, the Worker and the T3. `ligar`
  * starts the T3 server's part over them; `parar` stops it at once, which for the journal is a
- * crash, since every step it took is already durable.
+ * crash, since every step it took is already durable. Nothing here waits on time: `quando` waits
+ * for the next change, and the clock moves only when a test moves it.
  */
 const maquina = Effect.gen(function* () {
   const base = yield* Effect.acquireRelease(
     Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-editaii-connector-"))),
     (dir) => Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true })),
   );
-  const worker = fakeWorker();
-  const t3 = fakeT3();
+  const mudou = sinal();
+  const worker = fakeWorker(mudou);
+  const t3 = fakeT3(mudou);
   let salvo: Uint8Array | undefined = conectada("maquina-1");
-  // The journal as it is, but for the next call of each operation named here, which fails.
+  // The test clock, telling the test when the connector begins a pause.
+  const relogio = yield* Clock.Clock;
+  let emPausa = 0;
+  const clock: Clock.Clock = {
+    ...relogio,
+    sleep: (duration) =>
+      Duration.equals(duration, PAUSA)
+        ? Effect.sync(() => {
+            emPausa += 1;
+            mudou.avisar();
+          }).pipe(
+            Effect.andThen(relogio.sleep(duration)),
+            Effect.ensuring(Effect.sync(() => (emPausa -= 1))),
+          )
+        : relogio.sleep(duration),
+  };
+  // The journal as it is, but for the next call of each operation named in `falhar`, which fails,
+  // and for `desligar`, which holds after writing the intent while `segurarDesligar` is set.
   const falhar = new Set<"observar" | "proximoEvento">();
   const falha = (operacao: "observar" | "proximoEvento") =>
     falhar.delete(operacao)
       ? Effect.fail(new Journal.EditaiiJournalError({ reason: "storage", detail: operacao }))
       : Effect.void;
+  const desligar = {
+    segurar: null as Deferred.Deferred<void> | null,
+    escritos: 0,
+  };
+  // How many events the journal recorded as answered by the Worker.
+  let eventosGravados = 0;
   const journal = Layer.effect(
     Journal.EditaiiJournal,
     Effect.gen(function* () {
@@ -481,12 +564,36 @@ const maquina = Effect.gen(function* () {
         observar: (v, trabalhoId, o) =>
           falha("observar").pipe(Effect.andThen(j.observar(v, trabalhoId, o))),
         proximoEvento: (v) => falha("proximoEvento").pipe(Effect.andThen(j.proximoEvento(v))),
+        eventoEnviado: (v, evento, resultado) =>
+          j.eventoEnviado(v, evento, resultado).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                eventosGravados += 1;
+                mudou.avisar();
+              }),
+            ),
+          ),
+        desligar: (v) =>
+          j.desligar(v).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                desligar.escritos += 1;
+                mudou.avisar();
+              }),
+            ),
+            Effect.andThen(
+              Effect.suspend(() =>
+                desligar.segurar === null ? Effect.void : Deferred.await(desligar.segurar),
+              ),
+            ),
+          ),
       });
     }),
   ).pipe(Layer.provide(Journal.layer));
   const deps = Layer.mergeAll(
     NodeServices.layer,
     ServerConfig.layerTest(process.cwd(), base).pipe(Layer.provide(NodeServices.layer)),
+    Layer.succeed(Clock.Clock, clock),
     Layer.succeed(HostProcess.Platform, "linux"),
     Layer.succeed(HostProcess.Environment, {}),
     Layer.succeed(ProcessRunner.ProcessRunner, { run: () => Effect.die("unused platform probe") }),
@@ -538,65 +645,66 @@ const maquina = Effect.gen(function* () {
       connector: Context.get(context, Connector.EditaiiConnector),
       journal: Context.get(context, Journal.EditaiiJournal),
       vinculo: connection.state.pipe(Effect.map(Connection.vinculoDo)),
+      /** Waits until no link is connected. */
+      desconectado: connection.changes.pipe(
+        Stream.filter((s) => Connection.vinculoDo(s) === null),
+        Stream.take(1),
+        Stream.runDrain,
+      ),
     };
   });
   return {
     worker,
     t3: t3.t,
     fato: t3.fato,
+    perder: t3.perder,
     ligar,
     falhar,
+    desligar,
+    quando: mudou.quando,
+    eventosGravados: () => eventosGravados,
+    /** Lets the connector's pause pass, once it has begun one. */
+    pausa: mudou.quando(() => emPausa > 0).pipe(Effect.andThen(TestClock.adjust(PAUSA))),
     /** The machine saved as connected the next time the T3 starts. */
     salvar: (maquinaId: string) => {
       salvo = conectada(maquinaId);
     },
   };
 });
+type Maquina = Effect.Success<typeof maquina>;
 
-const vez = Effect.yieldNow;
-/** Lets the connector run, the test clock moving as it waits, until `condicao` holds. */
-const ate = Effect.fn("test.ate")(function* (
-  descricao: string,
-  condicao: () => boolean | Effect.Effect<boolean>,
-) {
-  for (let i = 0; i < 300; i++) {
-    const valor = condicao();
-    if (typeof valor === "boolean" ? valor : yield* valor) return;
-    yield* vez;
-    yield* TestClock.adjust("1 second");
-  }
-  return yield* Effect.die(new Error(`timed out waiting for ${descricao}`));
-});
-/** Lets the connector run with the clock stopped: what it records goes out without waiting. */
-const semEsperar = Effect.fn("test.semEsperar")(function* (
-  descricao: string,
-  condicao: () => boolean,
-) {
-  for (let i = 0; i < 300; i++) {
-    if (condicao()) return;
-    yield* vez;
-  }
-  return yield* Effect.die(new Error(`${descricao} waited for the clock`));
-});
-/** Lets the connector run for a while, to show that something does not happen. */
-const passar = Effect.fn("test.passar")(function* (segundos: number) {
-  for (let i = 0; i < segundos; i++) {
-    yield* vez;
-    yield* TestClock.adjust("1 second");
-  }
-});
+/** Long enough for any pause and retry to run, to show that something does not happen. */
+const umMinuto = TestClock.adjust("1 minute");
 const tipos = (eventos: ReadonlyArray<Protocol.Evento>) =>
   eventos.map((e) => `${e.trabalho_id}:${e.sequencia}:${e.tipo}`);
 
 /** Request 1 accepted, confirmed and asking question `x`, which the person sees. */
-const perguntando = Effect.fn("test.perguntando")(function* (m: Effect.Success<typeof maquina>) {
+const perguntando = Effect.fn("test.perguntando")(function* (m: Maquina) {
   m.worker.pedir(1);
   const t3 = yield* m.ligar;
-  yield* ate("the request to start", () => m.worker.estado(1) === "em_execucao");
+  yield* m.quando(() => m.worker.estado(1) === "em_execucao");
   yield* m.fato(1, pergunta("x"));
-  yield* ate("the question to reach the person", () => m.worker.estado(1) === "aguardando_pessoa");
+  yield* m.quando(() => m.worker.estado(1) === "aguardando_pessoa");
   return t3;
 });
+
+/** Request 1 ran to its answer, the machine recorded the Worker has it, and the T3 stopped. */
+const concluido = Effect.fn("test.concluido")(function* (m: Maquina) {
+  m.worker.pedir(1);
+  const antes = yield* m.ligar;
+  yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+  yield* m.fato(1, resposta("Um"));
+  yield* m.quando(() => m.eventosGravados() === 1);
+  yield* antes.parar;
+});
+
+/** The receipts of the deliveries chosen wait for the gate returned before reaching the Worker. */
+const travar = (m: Maquina, entregaId: (id: string) => boolean) =>
+  Effect.gen(function* () {
+    const trava = yield* Deferred.make<void>();
+    m.worker.travarRecibo = (id) => (entregaId(id) ? trava : undefined);
+    return trava;
+  });
 
 describe("EditaiiConnector", () => {
   it.effect("carries a request, a question, its answer and the result, each invoked once", () =>
@@ -604,10 +712,10 @@ describe("EditaiiConnector", () => {
       const m = yield* maquina;
       yield* perguntando(m);
       m.worker.responder(1, SIM);
-      yield* ate("the answer to resume the job", () => m.worker.estado(1) === "em_execucao");
+      yield* m.quando(() => m.worker.estado(1) === "em_execucao");
       yield* m.fato(1, resolvida("x"));
       yield* m.fato(1, resposta("Pronto"));
-      yield* ate("the job to end", () => m.worker.estado(1) === "concluido");
+      yield* m.quando(() => m.worker.estado(1) === "concluido");
 
       assert.equal(m.t3.chamadasAccept, 1);
       assert.equal(m.t3.chamadasRespond, 1);
@@ -627,37 +735,32 @@ describe("EditaiiConnector", () => {
   it.effect("tells nothing of a job until the Worker takes the request's receipt", () =>
     Effect.gen(function* () {
       const m = yield* maquina;
-      const trava = yield* Deferred.make<void>();
-      m.worker.travarConfirmacao = trava;
+      const trava = yield* travar(m, (id) => id === "entrega-1");
       m.worker.pedir(1);
       yield* m.ligar;
-      yield* ate("the request to be accepted", () => m.t3.chamadasAccept === 1);
+      yield* m.quando(() => m.t3.chamadasAccept === 1);
       yield* m.fato(1, pergunta("x"));
-      yield* passar(60);
+      yield* umMinuto;
       assert.equal(m.worker.estado(1), "entregue");
       assert.deepEqual(m.worker.enviados, []);
 
-      m.worker.travarConfirmacao = null;
       yield* Deferred.succeed(trava, undefined);
-      yield* ate(
-        "the question to reach the person",
-        () => m.worker.estado(1) === "aguardando_pessoa",
-      );
+      yield* m.quando(() => m.worker.estado(1) === "aguardando_pessoa");
       assert.deepEqual(tipos(m.worker.aplicados), ["trabalho-1:1:intervencao"]);
       assert.deepEqual(m.worker.invalidos, []);
     }).pipe(Effect.scoped),
   );
 
-  it.effect("a request the T3 refuses fails its job, and the next one runs", () =>
+  it.effect("a request the T3 refuses fails its job, and the next one runs at once", () =>
     Effect.gen(function* () {
       const m = yield* maquina;
       m.t3.aceitar = "recusar";
       m.worker.pedir(1, "conversa-1");
       yield* m.ligar;
-      yield* semEsperar("the failure", () => m.worker.estado(1) === "falhou");
+      yield* m.quando(() => m.worker.estado(1) === "falhou");
       m.t3.aceitar = "aceitar";
       m.worker.pedir(2, "conversa-1");
-      yield* ate("the next request to start", () => m.worker.estado(2) === "em_execucao");
+      yield* m.quando(() => m.worker.estado(2) === "em_execucao");
       assert.deepEqual(tipos(m.worker.aplicados), ["trabalho-1:1:falha"]);
       assert.deepEqual(m.worker.invalidos, []);
     }).pipe(Effect.scoped),
@@ -669,8 +772,8 @@ describe("EditaiiConnector", () => {
       yield* perguntando(m);
       m.t3.responder = "recusar";
       m.worker.responder(1, SIM);
-      yield* ate("the answer to reach the T3", () => m.t3.chamadasRespond === 1);
-      yield* semEsperar("the failure", () => m.worker.estado(1) === "falhou");
+      yield* m.quando(() => m.worker.estado(1) === "falhou");
+      assert.equal(m.t3.chamadasRespond, 1);
       assert.deepEqual(tipos(m.worker.aplicados), [
         "trabalho-1:1:intervencao",
         "trabalho-1:2:falha",
@@ -686,8 +789,8 @@ describe("EditaiiConnector", () => {
       m.worker.pedir(1, "conversa-1");
       m.worker.pedir(2, "conversa-2");
       yield* m.ligar;
-      yield* ate("the other request to start", () => m.worker.estado(2) === "em_execucao");
-      yield* passar(60);
+      yield* m.quando(() => m.worker.estado(2) === "em_execucao");
+      yield* umMinuto;
       assert.deepEqual(
         m.worker.confirmacoes.map((c) => c.entregaId),
         ["entrega-1", "entrega-2"],
@@ -702,12 +805,12 @@ describe("EditaiiConnector", () => {
       m.worker.perderResposta.add("confirmar");
       m.worker.pedir(1);
       const antes = yield* m.ligar;
-      yield* ate("the receipt to be taken", () => m.worker.estado(1) === "em_execucao");
+      yield* m.quando(() => m.worker.estado(1) === "em_execucao");
       yield* antes.parar;
 
       yield* m.ligar;
       yield* m.fato(1, resposta("Pronto"));
-      yield* ate("the job to end", () => m.worker.estado(1) === "concluido");
+      yield* m.quando(() => m.worker.estado(1) === "concluido");
       assert.deepEqual(
         m.worker.confirmacoes.map((c) => c.entregaId),
         ["entrega-1", "entrega-1"],
@@ -716,31 +819,17 @@ describe("EditaiiConnector", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("a journal failure while following a job starts the work again from the journal", () =>
-    Effect.gen(function* () {
-      const m = yield* maquina;
-      m.falhar.add("observar");
-      yield* perguntando(m);
-      assert.isFalse(m.falhar.has("observar"));
-      assert.deepEqual(tipos(m.worker.aplicados), ["trabalho-1:1:intervencao"]);
-    }).pipe(Effect.scoped),
-  );
-
-  it.effect("a journal failure while sending starts the work again from the journal", () =>
-    Effect.gen(function* () {
-      const m = yield* maquina;
-      m.falhar.add("proximoEvento");
-      yield* perguntando(m);
-      assert.isFalse(m.falhar.has("proximoEvento"));
-      assert.deepEqual(tipos(m.worker.aplicados), ["trabalho-1:1:intervencao"]);
-    }).pipe(Effect.scoped),
-  );
-
-  it.effect("a receipt whose reply was lost is sent again, the same", () =>
+  it.effect("a receipt whose reply was lost is sent again, the same, after a pause", () =>
     Effect.gen(function* () {
       const m = yield* maquina;
       m.worker.perderResposta.add("confirmar");
-      yield* perguntando(m);
+      m.worker.pedir(1);
+      yield* m.ligar;
+      yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+      yield* m.pausa;
+      yield* m.quando(() => m.worker.confirmacoes.length === 2);
+      yield* m.fato(1, pergunta("x"));
+      yield* m.quando(() => m.worker.estado(1) === "aguardando_pessoa");
       const [primeira, segunda, ...outras] = m.worker.confirmacoes;
       assert.deepEqual(outras, []);
       assert.equal(primeira?.entregaId, "entrega-1");
@@ -754,24 +843,17 @@ describe("EditaiiConnector", () => {
     Effect.gen(function* () {
       const m = yield* maquina;
       yield* perguntando(m);
-      const trava = yield* Deferred.make<void>();
-      m.worker.travarConfirmacao = trava;
+      const trava = yield* travar(m, (id) => id.startsWith("resposta-"));
       m.worker.responder(1, SIM);
-      yield* ate("the answer to reach the T3", () => m.t3.chamadasRespond === 1);
+      yield* m.quando(() => m.t3.chamadasRespond === 1);
       // The T3 goes on and asks again while the answer's receipt is stuck.
       yield* m.fato(1, resolvida("x"));
       yield* m.fato(1, pergunta("y"));
-      yield* ate(
-        "the new question to reach the person",
-        () => m.worker.trabalho(1)?.intervencao?.referencia === "y",
-      );
+      yield* m.quando(() => m.worker.trabalho(1)?.intervencao?.referencia === "y");
 
-      m.worker.travarConfirmacao = null;
       yield* Deferred.succeed(trava, undefined);
-      yield* ate("the answer's receipt", () =>
-        m.worker.confirmacoes.some((c) => c.entregaId.startsWith("resposta-")),
-      );
-      yield* passar(10);
+      yield* m.quando(() => m.worker.confirmacoes.some((c) => c.entregaId.startsWith("resposta-")));
+      yield* umMinuto;
       assert.equal(m.worker.estado(1), "aguardando_pessoa");
       assert.isTrue(m.worker.trabalho(1)?.intervencao?.aberta);
       assert.deepEqual(tipos(m.worker.aplicados), [
@@ -783,6 +865,82 @@ describe("EditaiiConnector", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("a receipt the Worker does not take yet holds back no job already followed", () =>
+    Effect.gen(function* () {
+      const m = yield* maquina;
+      yield* travar(m, (id) => id === "entrega-2");
+      m.worker.pedir(1, "conversa-1");
+      m.worker.pedir(2, "conversa-2");
+      const antes = yield* m.ligar;
+      yield* m.quando(
+        () =>
+          m.worker.estado(1) === "em_execucao" &&
+          m.worker.chamadas.includes("maquina/entregas/entrega-2/confirmar"),
+      );
+      yield* antes.parar;
+
+      // After the restart, the receipt of request 2 is still on its way when request 1 answers.
+      yield* m.ligar;
+      yield* m.fato(1, resposta("Um"));
+      yield* m.quando(() => m.worker.estado(1) === "concluido");
+      assert.equal(m.worker.estado(2), "entregue");
+      assert.equal(m.t3.chamadasAccept, 2);
+    }).pipe(Effect.scoped),
+  );
+
+  describe("a journal failure starts the work again from the journal, after a pause", () => {
+    it.effect.each(["observar", "proximoEvento"] as const)("in %s", (operacao) =>
+      Effect.gen(function* () {
+        const m = yield* maquina;
+        m.worker.pedir(1);
+        yield* m.ligar;
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+        m.falhar.add(operacao);
+        yield* m.fato(1, pergunta("x"));
+        yield* m.pausa;
+        yield* m.quando(() => m.worker.estado(1) === "aguardando_pessoa");
+        assert.isFalse(m.falhar.has(operacao));
+        assert.deepEqual(tipos(m.worker.aplicados), ["trabalho-1:1:intervencao"]);
+        assert.equal(m.t3.chamadasAccept, 1);
+      }).pipe(Effect.scoped),
+    );
+  });
+
+  describe("after a restart, a conversation goes on only from a job the T3 still has", () => {
+    it.effect("the T3 still has it: the next request runs", () =>
+      Effect.gen(function* () {
+        const m = yield* maquina;
+        yield* concluido(m);
+
+        yield* m.ligar;
+        m.worker.pedir(2);
+        yield* m.quando(() => m.worker.estado(2) === "em_execucao");
+        assert.equal(m.t3.chamadasAccept, 2);
+        assert.deepEqual(tipos(m.worker.aplicados), ["trabalho-1:1:resposta"]);
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped),
+    );
+
+    it.effect("the T3 lost it: the conversation stops, and that job's result stays", () =>
+      Effect.gen(function* () {
+        const m = yield* maquina;
+        yield* concluido(m);
+        yield* m.perder(1);
+
+        yield* m.ligar;
+        m.worker.pedir(2);
+        yield* m.quando(() => m.worker.estado(2) === "reconciliacao");
+        assert.equal(m.t3.chamadasAccept, 1);
+        assert.equal(m.worker.estado(1), "concluido");
+        assert.deepEqual(tipos(m.worker.aplicados), [
+          "trabalho-1:1:resposta",
+          "trabalho-2:1:thread_perdida",
+        ]);
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped),
+    );
+  });
+
   describe("after a crash, an invoked delivery is only inspected", () => {
     it.effect("a request the T3 never took: the conversation stops for reconciliation", () =>
       Effect.gen(function* () {
@@ -790,12 +948,12 @@ describe("EditaiiConnector", () => {
         m.t3.aceitar = "travar_antes";
         m.worker.pedir(1);
         const antes = yield* m.ligar;
-        yield* ate("the request to be invoked", () => m.t3.chamadasAccept === 1);
+        yield* m.quando(() => m.t3.chamadasAccept === 1);
         yield* antes.parar;
 
         m.t3.aceitar = "aceitar";
         yield* m.ligar;
-        yield* semEsperar("the lost thread", () => m.worker.estado(1) === "reconciliacao");
+        yield* m.quando(() => m.worker.estado(1) === "reconciliacao");
         assert.equal(m.t3.chamadasAccept, 1);
         assert.deepEqual(tipos(m.worker.aplicados), ["trabalho-1:1:thread_perdida"]);
         assert.deepEqual(m.worker.invalidos, []);
@@ -808,14 +966,14 @@ describe("EditaiiConnector", () => {
         m.t3.aceitar = "travar_depois";
         m.worker.pedir(1);
         const antes = yield* m.ligar;
-        yield* ate("the request to be invoked", () => m.t3.chamadasAccept === 1);
+        yield* m.quando(() => m.t3.chamadasAccept === 1);
         yield* antes.parar;
 
         m.t3.aceitar = "aceitar";
         yield* m.ligar;
-        yield* ate("the request to start", () => m.worker.estado(1) === "em_execucao");
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
         yield* m.fato(1, resposta("Pronto"));
-        yield* ate("the job to end", () => m.worker.estado(1) === "concluido");
+        yield* m.quando(() => m.worker.estado(1) === "concluido");
         assert.equal(m.t3.chamadasAccept, 1);
         assert.deepEqual(m.worker.invalidos, []);
       }).pipe(Effect.scoped),
@@ -827,12 +985,12 @@ describe("EditaiiConnector", () => {
         const antes = yield* perguntando(m);
         m.t3.responder = "travar_antes";
         m.worker.responder(1, SIM);
-        yield* ate("the answer to be invoked", () => m.t3.chamadasRespond === 1);
+        yield* m.quando(() => m.t3.chamadasRespond === 1);
         yield* antes.parar;
 
         m.t3.responder = "aceitar";
         yield* m.ligar;
-        yield* semEsperar("the lost thread", () => m.worker.estado(1) === "reconciliacao");
+        yield* m.quando(() => m.worker.estado(1) === "reconciliacao");
         assert.equal(m.t3.chamadasRespond, 1);
         assert.deepEqual(m.worker.invalidos, []);
       }).pipe(Effect.scoped),
@@ -844,15 +1002,15 @@ describe("EditaiiConnector", () => {
         const antes = yield* perguntando(m);
         m.t3.responder = "travar_depois";
         m.worker.responder(1, SIM);
-        yield* ate("the answer to be invoked", () => m.t3.chamadasRespond === 1);
+        yield* m.quando(() => m.t3.chamadasRespond === 1);
         yield* antes.parar;
 
         m.t3.responder = "aceitar";
         yield* m.ligar;
-        yield* ate("the answer to resume the job", () => m.worker.estado(1) === "em_execucao");
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
         yield* m.fato(1, resolvida("x"));
         yield* m.fato(1, resposta("Pronto"));
-        yield* ate("the job to end", () => m.worker.estado(1) === "concluido");
+        yield* m.quando(() => m.worker.estado(1) === "concluido");
         assert.equal(m.t3.chamadasRespond, 1);
         assert.deepEqual(m.worker.invalidos, []);
       }).pipe(Effect.scoped),
@@ -863,22 +1021,35 @@ describe("EditaiiConnector", () => {
     it.effect("returns while the Worker is unreachable, and the link says nothing more", () =>
       Effect.gen(function* () {
         const m = yield* maquina;
-        const trava = yield* Deferred.make<void>();
-        m.worker.travarConfirmacao = trava;
+        const trava = yield* travar(m, () => true);
         m.worker.pedir(1);
         const t3 = yield* m.ligar;
-        yield* ate("the receipt to be on its way", () =>
-          m.worker.chamadas.some((c) => c.endsWith("/confirmar")),
-        );
+        yield* m.quando(() => m.worker.chamadas.some((c) => c.endsWith("/confirmar")));
 
         yield* t3.connector.desligar(V1);
         assert.isNull(yield* t3.vinculo);
         const chamadas = m.worker.chamadas.length;
-        m.worker.travarConfirmacao = null;
         yield* Deferred.succeed(trava, undefined);
-        yield* passar(60);
+        yield* umMinuto;
         assert.equal(m.worker.chamadas.length, chamadas);
         assert.deepEqual(m.worker.confirmacoes, []);
+      }).pipe(Effect.scoped),
+    );
+
+    it.effect("once the intent is written, disconnects even if its caller goes away", () =>
+      Effect.gen(function* () {
+        const m = yield* maquina;
+        const segurar = yield* Deferred.make<void>();
+        m.desligar.segurar = segurar;
+        const t3 = yield* m.ligar;
+        const desligando = yield* Effect.forkChild(t3.connector.desligar(V1));
+        yield* m.quando(() => m.desligar.escritos === 1);
+
+        // The caller goes away while the intent is written and the disconnect has not run yet.
+        yield* Effect.sync(() => desligando.interruptUnsafe());
+        yield* Deferred.succeed(segurar, undefined);
+        assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(desligando)));
+        assert.isNull(yield* t3.vinculo);
       }).pipe(Effect.scoped),
     );
 
@@ -891,10 +1062,8 @@ describe("EditaiiConnector", () => {
 
         const chamadas = m.worker.chamadas.length;
         const depois = yield* m.ligar;
-        yield* ate("the link to be disconnected", () =>
-          depois.vinculo.pipe(Effect.map((v) => v === null)),
-        );
-        yield* passar(30);
+        yield* depois.desconectado;
+        yield* umMinuto;
         assert.equal(m.worker.chamadas.length, chamadas);
       }).pipe(Effect.scoped),
     );
@@ -908,9 +1077,9 @@ describe("EditaiiConnector", () => {
         assert.deepEqual(yield* t3.vinculo, V2);
 
         m.worker.pedir(1);
-        yield* ate("the request to start", () => m.worker.estado(1) === "em_execucao");
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
         yield* m.fato(1, resposta("Pronto"));
-        yield* ate("the job to end", () => m.worker.estado(1) === "concluido");
+        yield* m.quando(() => m.worker.estado(1) === "concluido");
       }).pipe(Effect.scoped),
     );
   });
@@ -922,14 +1091,13 @@ describe("EditaiiConnector", () => {
       m.worker.pedir(1, "conversa-1");
       m.worker.pedir(2, "conversa-2");
       yield* m.ligar;
-      yield* ate(
-        "both requests to start",
+      yield* m.quando(
         () => m.worker.estado(1) === "em_execucao" && m.worker.estado(2) === "em_execucao",
       );
       yield* m.fato(1, resposta("Um"));
       yield* m.fato(2, resposta("Dois"));
-      yield* ate("the other job to end", () => m.worker.estado(2) === "concluido");
-      yield* passar(60);
+      yield* m.quando(() => m.worker.estado(2) === "concluido");
+      yield* umMinuto;
       assert.deepEqual(tipos(m.worker.recusados), ["trabalho-1:1:resposta"]);
       assert.equal(m.worker.estado(1), "em_execucao");
       assert.deepEqual(m.worker.invalidos, []);
@@ -941,11 +1109,13 @@ describe("EditaiiConnector", () => {
       const m = yield* maquina;
       m.worker.pedir(1);
       yield* m.ligar;
-      yield* ate("the request to start", () => m.worker.estado(1) === "em_execucao");
+      yield* m.quando(() => m.worker.estado(1) === "em_execucao");
       m.worker.perderResposta.add("eventos");
       yield* m.fato(1, resposta("Pronto"));
-      yield* ate("the job to end", () => m.worker.estado(1) === "concluido");
-      yield* passar(30);
+      yield* m.quando(() => m.worker.estado(1) === "concluido");
+      yield* m.pausa;
+      yield* m.quando(() => m.worker.enviados.length === 2);
+      yield* umMinuto;
       const [primeiro, segundo, ...outros] = m.worker.enviados;
       assert.deepEqual(outros, []);
       assert.include(primeiro, '"tipo":"resposta"');

@@ -157,12 +157,14 @@ const resposta = (
   trabalho: number,
   referencia: string,
   respostas: Protocol.Respostas,
+  // The Worker sends the conversation's thread, which its first request associated.
+  thread: string,
 ): Protocol.EntregaResposta => ({
   versao: 1,
   entrega_id: `resposta-${n}`,
   tipo: "resposta",
   trabalho_id: `trabalho-${trabalho}`,
-  conversa: { id: "conversa-1", geracao: 1, thread_t3: null },
+  conversa: { id: "conversa-1", geracao: 1, thread_t3: thread },
   intervencao: { id: `intervencao-${n}`, referencia, respostas },
 });
 const aceitacao = (plano: Adapter.RequestPlan): Adapter.Acceptance => ({
@@ -210,12 +212,24 @@ const resolved = (
   requestId: RuntimeRequestId.make(requestId),
   status,
 });
+const perdida = (): Adapter.Observation => ({
+  ...origem("lost"),
+  type: "thread_lost",
+  reason: "cursor",
+});
 const answer = (text: string): Adapter.Observation => ({
   ...origem("answer"),
   type: "answer",
   runId: run,
   text,
   messageId: MessageId.make("answer"),
+});
+const failure = (message: string): Adapter.Observation => ({
+  ...origem("failure"),
+  type: "failure",
+  runId: run,
+  reason: "run-ended",
+  message,
 });
 
 const executar = (passo: EditaiiJournal.Passo) => {
@@ -446,7 +460,7 @@ describe("EditaiiJournal deliveries", () => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect("a receipt the Worker refuses stops the job and its conversation", () =>
+  it.effect("a receipt the Worker refuses stops the job and its conversation, for good", () =>
     Effect.gen(function* () {
       const a = yield* ambiente;
       yield* usar(a, (j) =>
@@ -454,11 +468,175 @@ describe("EditaiiJournal deliveries", () => {
           const plano = planoDoPedido(yield* j.receber(V1, pedido(1), pronta));
           yield* j.resolver(V1, "entrega-1", { tipo: "aceita", aceitacao: aceitacao(plano) });
           assert.isNull(yield* j.confirmada(V1, "entrega-1", "conflito"));
+        }),
+      );
+      // After a restart the refused receipt is not sent again, not even if the delivery comes back.
+      const partida = yield* usar(a, (j) => j.partida(V1));
+      assert.deepEqual(partida, { type: "retomar", confirmar: [], observar: [] });
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          assert.deepEqual(yield* j.receber(V1, pedido(1), pronta), { type: "aguardar" });
           assert.strictEqual(yield* j.observar(V1, "trabalho-1", answer("Pronto")), "fim");
           assert.deepEqual(yield* j.receber(V1, pedido(2), pronta), { type: "aguardar" });
           assert.deepEqual(tipos(yield* enviar(j)), ["trabalho-2:1:thread_perdida"]);
+          const outro = yield* Effect.flip(j.confirmada(V1, "entrega-1", "ok"));
+          assert.strictEqual(outro.reason, "conflict");
         }),
       );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "after a restart, a conversation goes on only once the T3 is seen to still have its last job",
+    () =>
+      Effect.gen(function* () {
+        const a = yield* ambiente;
+        const plano = yield* usar(a, (j) =>
+          Effect.gen(function* () {
+            const { plano } = yield* iniciar(j);
+            yield* j.observar(V1, "trabalho-1", answer("Pronto"));
+            // Seen ending in this period: the conversation goes on at once.
+            const seguinte = pedido(2, { thread_t3: plano.threadId });
+            assert.strictEqual((yield* j.receber(V1, seguinte, pronta)).type, "executar");
+            return plano;
+          }),
+        );
+        yield* usar(a, (j) =>
+          Effect.gen(function* () {
+            yield* j.resolver(V1, "entrega-2", { tipo: "recusada" });
+            yield* enviar(j);
+            yield* j.partida(V1);
+            const terceiro = pedido(3, { thread_t3: plano.threadId });
+            // Job 2 never reached the T3, so job 1 is the base to check.
+            const conferir: EditaiiJournal.Passo = {
+              type: "conferir",
+              observado: {
+                trabalhoId: "trabalho-1",
+                aceitacao: aceitacao(plano),
+                cursor: sequence,
+              },
+            };
+            assert.deepEqual(yield* j.receber(V1, terceiro, pronta), conferir);
+            assert.deepEqual(yield* j.receber(V1, terceiro, pronta), conferir);
+            assert.strictEqual(yield* j.observar(V1, "trabalho-1", answer("Pronto")), "fim");
+            assert.strictEqual((yield* j.receber(V1, terceiro, pronta)).type, "executar");
+            // Its result stays as it was.
+            assert.deepEqual(tipos(yield* enviar(j)), []);
+          }),
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("a conversation whose last job the T3 lost stops; that job's result stays", () =>
+    Effect.gen(function* () {
+      const a = yield* ambiente;
+      const plano = yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          const { plano } = yield* iniciar(j);
+          yield* j.observar(V1, "trabalho-1", answer("Pronto"));
+          yield* enviar(j);
+          return plano;
+        }),
+      );
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          yield* j.partida(V1);
+          const seguinte = pedido(2, { thread_t3: plano.threadId });
+          assert.strictEqual((yield* j.receber(V1, seguinte, pronta)).type, "conferir");
+          assert.strictEqual(yield* j.observar(V1, "trabalho-1", perdida()), "fim");
+          assert.deepEqual(yield* j.receber(V1, seguinte, pronta), { type: "aguardar" });
+          assert.deepEqual(tipos(yield* enviar(j)), ["trabalho-2:1:thread_perdida"]);
+        }),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect.each([
+    { fim: "answer", observacao: () => answer("Pronto") },
+    { fim: "failure", observacao: () => failure("Caiu") },
+  ])("a job seen ending by its $fim lets its conversation go on at once", ({ observacao }) =>
+    Effect.gen(function* () {
+      const a = yield* ambiente;
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          yield* j.partida(V1);
+          const { plano } = yield* iniciar(j);
+          yield* j.observar(V1, "trabalho-1", observacao());
+          const seguinte = pedido(2, { thread_t3: plano.threadId });
+          assert.strictEqual((yield* j.receber(V1, seguinte, pronta)).type, "executar");
+        }),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("after a restart, the job checked is the conversation's latest one the T3 took", () =>
+    Effect.gen(function* () {
+      const a = yield* ambiente;
+      const plano = yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          const { plano } = yield* iniciar(j);
+          yield* j.observar(V1, "trabalho-1", answer("Um"));
+          yield* iniciar(j, V1, pedido(2, { thread_t3: plano.threadId }));
+          yield* j.observar(V1, "trabalho-2", answer("Dois"));
+          yield* enviar(j);
+          return plano;
+        }),
+      );
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          yield* j.partida(V1);
+          const passo = yield* j.receber(V1, pedido(3, { thread_t3: plano.threadId }), pronta);
+          assert.strictEqual(passo.type === "conferir" && passo.observado.trabalhoId, "trabalho-2");
+        }),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("an answer that disagrees with its conversation after the job ended stops it", () =>
+    Effect.gen(function* () {
+      const a = yield* ambiente;
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          const { plano } = yield* iniciar(j);
+          yield* j.observar(V1, "trabalho-1", question("X"));
+          yield* j.observar(V1, "trabalho-1", answer("Pronto"));
+          yield* enviar(j);
+          const tardia = resposta(1, 1, "X", { p1: { texto: "ok" } }, "outra-thread");
+          assert.deepEqual(yield* j.receber(V1, tardia, pronta), { type: "aguardar" });
+          // The job's result stays; the next request finds the conversation stopped.
+          assert.deepEqual(tipos(yield* enviar(j)), []);
+          const seguinte = pedido(2, { thread_t3: plano.threadId });
+          assert.deepEqual(yield* j.receber(V1, seguinte, pronta), { type: "aguardar" });
+          assert.deepEqual(tipos(yield* enviar(j)), ["trabalho-2:1:thread_perdida"]);
+        }),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("an answer for another conversation, generation or thread never reaches the T3", () =>
+    Effect.gen(function* () {
+      for (const conversa of [
+        { id: "outra" },
+        { geracao: 2 },
+        { thread_t3: "outra-thread" },
+      ] satisfies Array<Partial<Protocol.Conversa>>) {
+        const a = yield* ambiente;
+        yield* usar(a, (j) =>
+          Effect.gen(function* () {
+            const { plano } = yield* iniciar(j);
+            yield* j.observar(V1, "trabalho-1", question("X"));
+            const certa = resposta(1, 1, "X", { p1: { texto: "ok" } }, plano.threadId);
+            const errada = { ...certa, conversa: { ...certa.conversa, ...conversa } };
+            assert.deepEqual(yield* j.receber(V1, errada, pronta), { type: "aguardar" });
+            assert.deepEqual(tipos(yield* enviar(j)), [
+              "trabalho-1:1:intervencao",
+              "trabalho-1:2:thread_perdida",
+            ]);
+            const seguinte = pedido(2, { thread_t3: plano.threadId });
+            assert.deepEqual(yield* j.receber(V1, seguinte, pronta), { type: "aguardar" });
+          }),
+        );
+      }
     }).pipe(Effect.scoped),
   );
 });
@@ -604,11 +782,17 @@ describe("EditaiiJournal requests", () => {
               },
             ],
           });
-          const entrega = resposta(1, 1, "X", {
-            p1: { opcoes: ["1"] },
-            p2: { opcoes: ["2", "1"] },
-            p3: { texto: "Sim" },
-          });
+          const entrega = resposta(
+            1,
+            1,
+            "X",
+            {
+              p1: { opcoes: ["1"] },
+              p2: { opcoes: ["2", "1"] },
+              p3: { texto: "Sim" },
+            },
+            plano.threadId,
+          );
           const execucao = executar(yield* j.receber(V1, entrega, pronta));
           if (execucao.tipo !== "resposta") throw new Error("expected an answer");
           assert.strictEqual(execucao.plano.threadId, plano.threadId);
@@ -642,17 +826,21 @@ describe("EditaiiJournal requests", () => {
         const a = yield* ambiente;
         yield* usar(a, (j) =>
           Effect.gen(function* () {
-            yield* iniciar(j);
+            const { plano } = yield* iniciar(j);
             yield* j.observar(V1, "trabalho-1", question("X"));
             yield* j.observar(V1, "trabalho-1", question("Y"));
             yield* j.observar(V1, "trabalho-1", resolved("X"));
             // Y is now the one waited on; X's late answer must not answer it.
             assert.deepEqual(
-              yield* j.receber(V1, resposta(1, 1, "X", { p1: { texto: "tarde" } }), pronta),
+              yield* j.receber(
+                V1,
+                resposta(1, 1, "X", { p1: { texto: "tarde" } }, plano.threadId),
+                pronta,
+              ),
               { type: "aguardar" },
             );
 
-            const y = resposta(2, 1, "Y", { p1: { texto: "ok" } });
+            const y = resposta(2, 1, "Y", { p1: { texto: "ok" } }, plano.threadId);
             executar(yield* j.receber(V1, y, pronta));
             assert.deepEqual(yield* j.resolver(V1, y.entrega_id, { tipo: "superada" }), {
               type: "aguardar",
@@ -661,7 +849,7 @@ describe("EditaiiJournal requests", () => {
             yield* j.observar(V1, "trabalho-1", resolved("Y"));
 
             yield* j.observar(V1, "trabalho-1", question("Z"));
-            const z = resposta(3, 1, "Z", { p1: { texto: "ok" } });
+            const z = resposta(3, 1, "Z", { p1: { texto: "ok" } }, plano.threadId);
             executar(yield* j.receber(V1, z, pronta));
             yield* j.resolver(V1, z.entrega_id, { tipo: "nao_retomavel" });
             assert.strictEqual(yield* j.observar(V1, "trabalho-1", answer("tarde")), "fim");

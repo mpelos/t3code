@@ -69,15 +69,20 @@ export type Execucao =
   | { readonly tipo: "pedido"; readonly entregaId: string; readonly plano: RequestPlan }
   | { readonly tipo: "resposta"; readonly entregaId: string; readonly plano: AnswerPlan };
 
-/**
- * What the connector does next with a delivery. `executar`: invoke the T3 now. `inspecionar`: the
- * T3 was invoked and the outcome is unknown; only inspection may decide, never a new invocation.
- * `confirmar`: send the receipt. `aguardar`: nothing to do; the outbox tells the Worker the rest.
- */
+/** What the connector does next with a delivery. */
 export type Passo =
+  /**
+   * Before the conversation goes on, follow its last ended job in the T3 until the first fact,
+   * which tells whether the T3 still has it; then receive the delivery again.
+   */
+  | { readonly type: "conferir"; readonly observado: Observado }
+  /** Invoke the T3 now. */
   | { readonly type: "executar"; readonly execucao: Execucao }
+  /** The T3 was invoked and the outcome is unknown: only inspection decides, never invoking again. */
   | { readonly type: "inspecionar"; readonly execucao: Execucao }
+  /** Send the receipt. */
   | { readonly type: "confirmar"; readonly entregaId: string; readonly recibo: Protocol.Recibo }
+  /** Nothing to do; the outbox tells the Worker the rest. */
   | { readonly type: "aguardar" };
 
 /** The outcome of invoking or inspecting the T3 for one delivery. */
@@ -110,9 +115,10 @@ export type Partida =
 
 export interface EditaiiJournalShape {
   /**
-   * First call for a link. A pending disconnect comes before everything: no recovery, receipt or
-   * event of that link may go out. Otherwise, the receipts the Worker may never have taken (it
-   * does not serve a confirmed delivery again) and the confirmed jobs to follow.
+   * First call for a link. A pending disconnect comes first: nothing of that link may go out.
+   * Else the receipts the Worker may not have taken (it never serves a confirmed delivery again)
+   * and the confirmed jobs to follow. The T3 may have lost its last commits before this start, so
+   * each conversation is checked again (`conferir`) before its next request.
    */
   readonly partida: (vinculo: EditaiiVinculo) => Effect.Effect<Partida, EditaiiJournalError>;
   /**
@@ -140,7 +146,11 @@ export interface EditaiiJournalShape {
     entregaId: string,
     resultado: "ok" | "conflito",
   ) => Effect.Effect<Observado | null, EditaiiJournalError>;
-  /** Projects one observation of a followed job; `fim` once the job ended here. */
+  /**
+   * Projects one observation of a followed job; `fim` once the job ended here. A job that already
+   * ended is only followed to check its conversation: a lost thread stops the conversation, and
+   * any other fact shows the T3 still has it.
+   */
   readonly observar: (
     vinculo: EditaiiVinculo,
     trabalhoId: string,
@@ -186,6 +196,9 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       thread_reservada TEXT NOT NULL,
       thread_associada TEXT,
       bloqueio TEXT,
+      -- Whether, since the last start, the T3 was seen to still have the conversation's last ended
+      -- job: it ended while followed, or it was checked.
+      conferida INTEGER NOT NULL DEFAULT 0 CHECK (conferida IN (0, 1)),
       PRIMARY KEY (vinculo, conversa_id)
     ) STRICT`,
     `CREATE TABLE trabalhos (
@@ -211,13 +224,14 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       plano TEXT,
       fase TEXT NOT NULL CHECK (fase IN ('iniciada', 'resolvida')),
       desfecho TEXT,
-      confirmada_em TEXT,
+      -- The Worker's verdict on the receipt; until it comes, the receipt is sent again.
+      confirmacao TEXT CHECK (confirmacao IN ('aceita', 'recusada')),
       PRIMARY KEY (vinculo, entrega_id),
       FOREIGN KEY (vinculo, trabalho_id) REFERENCES trabalhos (vinculo, trabalho_id)
         DEFERRABLE INITIALLY DEFERRED,
       CHECK ((fase = 'resolvida') = (desfecho IS NOT NULL)),
       CHECK (plano IS NOT NULL OR fase = 'resolvida'),
-      CHECK (confirmada_em IS NULL OR fase = 'resolvida')
+      CHECK (confirmacao IS NULL OR fase = 'resolvida')
     ) STRICT`,
     `CREATE TABLE pendencias (
       vinculo TEXT NOT NULL,
@@ -376,7 +390,20 @@ type EntregaRow = {
   readonly plano: string | null;
   readonly fase: "iniciada" | "resolvida";
   readonly desfecho: string | null;
+  readonly confirmacao: "aceita" | "recusada" | null;
 };
+type ConversaRow = {
+  readonly geracao: number;
+  readonly thread_reservada: string;
+  readonly thread_associada: string | null;
+  readonly bloqueio: string | null;
+  readonly conferida: 0 | 1;
+};
+/** The Worker and the journal must agree on the conversation; a stopped one runs nothing more. */
+const diverge = (local: ConversaRow | undefined, enviada: Protocol.Conversa) =>
+  (local?.bloqueio ?? null) !== null ||
+  (local !== undefined && local.geracao !== enviada.geracao) ||
+  enviada.thread_t3 !== (local?.thread_associada ?? null);
 type TrabalhoRow = {
   readonly trabalho_id: string;
   readonly conversa_id: string;
@@ -571,7 +598,7 @@ const make = Effect.gen(function* () {
 
   const entrega = Effect.fn(function* (k: string, entregaId: string) {
     const [row] = yield* sql<EntregaRow>`
-      SELECT trabalho_id, tipo, envelope, plano, fase, desfecho FROM entregas
+      SELECT trabalho_id, tipo, envelope, plano, fase, desfecho, confirmacao FROM entregas
       WHERE vinculo = ${k} AND entrega_id = ${entregaId}`;
     return row;
   });
@@ -609,9 +636,12 @@ const make = Effect.gen(function* () {
       comandos: [primeiro, ...resto],
     };
   };
-  const passoDe = (entregaId: string, d: DesfechoGravado): Passo => {
+  /** A settled delivery's next step: its receipt, until the Worker gave its verdict on it. */
+  const passoDe = (entregaId: string, d: DesfechoGravado, row: EntregaRow): Passo => {
     const recibo = reciboDe(d);
-    return recibo === null ? { type: "aguardar" } : { type: "confirmar", entregaId, recibo };
+    return recibo === null || row.confirmacao !== null
+      ? { type: "aguardar" }
+      : { type: "confirmar", entregaId, recibo };
   };
   const aceitacaoDo = Effect.fn(function* (k: string, t: TrabalhoRow) {
     const row = yield* entrega(k, t.entrega_pedido);
@@ -620,19 +650,38 @@ const make = Effect.gen(function* () {
     return d.aceitacao;
   });
 
+  const conversaDe = Effect.fn(function* (k: string, conversaId: string) {
+    const [row] = yield* sql<ConversaRow>`
+      SELECT geracao, thread_reservada, thread_associada, bloqueio, conferida FROM conversas
+      WHERE vinculo = ${k} AND conversa_id = ${conversaId}`;
+    return row;
+  });
+  const conferida = (k: string, conversaId: string) =>
+    sql`UPDATE conversas SET conferida = 1 WHERE vinculo = ${k} AND conversa_id = ${conversaId}`;
+  /** The conversation's last job the T3 took that has ended here, to check the T3 still has it. */
+  const ultimoEncerrado = Effect.fn(function* (k: string, conversaId: string) {
+    const [t] = yield* sql<TrabalhoRow>`
+      SELECT t.trabalho_id, t.conversa_id, t.entrega_pedido, t.estado, t.cursor FROM trabalhos t
+      JOIN entregas e ON e.vinculo = t.vinculo AND e.entrega_id = t.entrega_pedido
+      WHERE t.vinculo = ${k} AND t.conversa_id = ${conversaId}
+        AND t.estado IN ('concluido', 'falhou', 'parado')
+        AND json_extract(e.desfecho, '$.tipo') = 'aceita'
+      ORDER BY t.rowid DESC LIMIT 1`;
+    if (t === undefined) return undefined;
+    return {
+      trabalhoId: t.trabalho_id,
+      aceitacao: yield* aceitacaoDo(k, t),
+      cursor: t.cursor,
+    } satisfies Observado;
+  });
+
   const receberPedido = Effect.fn(function* (
     k: string,
     e: Protocol.EntregaPedido,
     envelope: string,
     configuracao: Configuracao,
   ) {
-    const [conversa] = yield* sql<{
-      readonly geracao: number;
-      readonly thread_reservada: string;
-      readonly thread_associada: string | null;
-      readonly bloqueio: string | null;
-    }>`SELECT geracao, thread_reservada, thread_associada, bloqueio FROM conversas
-       WHERE vinculo = ${k} AND conversa_id = ${e.conversa.id}`;
+    const conversa = yield* conversaDe(k, e.conversa.id);
     if (conversa === undefined) {
       yield* sql`INSERT INTO conversas (vinculo, conversa_id, geracao, thread_reservada)
                  VALUES (${k}, ${e.conversa.id}, ${e.conversa.geracao},
@@ -645,13 +694,7 @@ const make = Effect.gen(function* () {
       return yield* trabalho(k, e.trabalho_id);
     });
 
-    // The Worker and the journal must agree on the conversation; a stopped one runs nothing more.
-    const associada = conversa?.thread_associada ?? null;
-    if (
-      (conversa?.bloqueio ?? null) !== null ||
-      (conversa !== undefined && conversa.geracao !== e.conversa.geracao) ||
-      e.conversa.thread_t3 !== associada
-    ) {
+    if (diverge(conversa, e.conversa)) {
       const t = yield* registrar(null, {
         versao: 1,
         tipo: "nao_executada",
@@ -659,6 +702,12 @@ const make = Effect.gen(function* () {
       });
       yield* perderThread(k, t);
       return { type: "aguardar" } satisfies Passo;
+    }
+    const associada = conversa?.thread_associada ?? null;
+    if (associada !== null && conversa?.conferida === 0) {
+      const ultimo = yield* ultimoEncerrado(k, e.conversa.id);
+      if (ultimo !== undefined) return { type: "conferir", observado: ultimo } satisfies Passo;
+      yield* conferida(k, e.conversa.id);
     }
     const id = idDaEntrega(k, e.entrega_id);
     const base = {
@@ -704,6 +753,19 @@ const make = Effect.gen(function* () {
     envelope: string,
   ) {
     const t = yield* trabalho(k, e.trabalho_id);
+    if (
+      t.conversa_id !== e.conversa.id ||
+      diverge(yield* conversaDe(k, t.conversa_id), e.conversa)
+    ) {
+      yield* inserirEntrega(k, e, envelope, null, {
+        versao: 1,
+        tipo: "nao_executada",
+        evento: "thread_perdida",
+      });
+      if (naoTerminou(t.estado)) yield* perderThread(k, t);
+      else yield* bloquear(k, t.conversa_id, "thread_perdida");
+      return { type: "aguardar" } satisfies Passo;
+    }
     const p = yield* selecionada(k, e.trabalho_id);
     // The run went on without this answer: the Worker hears it from the event already owed.
     if (
@@ -752,7 +814,7 @@ const make = Effect.gen(function* () {
           const execucao = yield* execucaoDe(e.entrega_id, row);
           return { type: "inspecionar", execucao } satisfies Passo;
         }
-        return passoDe(e.entrega_id, yield* desfechoJson.decode(row.desfecho));
+        return passoDe(e.entrega_id, yield* desfechoJson.decode(row.desfecho), row);
       }),
     );
   };
@@ -778,7 +840,7 @@ const make = Effect.gen(function* () {
           if (row.desfecho !== texto) {
             return yield* conflict(`delivery ${entregaId} already has another outcome`);
           }
-          return passoDe(entregaId, gravado);
+          return passoDe(entregaId, gravado, row);
         }
         yield* sql`UPDATE entregas SET fase = 'resolvida', desfecho = ${texto}
                    WHERE vinculo = ${k} AND entrega_id = ${entregaId}`;
@@ -812,7 +874,7 @@ const make = Effect.gen(function* () {
           case "respondida":
             break;
         }
-        return passoDe(entregaId, gravado);
+        return passoDe(entregaId, gravado, row);
       }),
     );
   };
@@ -827,6 +889,12 @@ const make = Effect.gen(function* () {
         if (row === undefined || d === null || reciboDe(d) === null) {
           return yield* conflict(`delivery ${entregaId} has no receipt to confirm`);
         }
+        const veredito = resultado === "ok" ? "aceita" : "recusada";
+        if (row.confirmacao !== null && row.confirmacao !== veredito) {
+          return yield* conflict(`the receipt of ${entregaId} was already ${row.confirmacao}`);
+        }
+        yield* sql`UPDATE entregas SET confirmacao = ${veredito}
+                   WHERE vinculo = ${k} AND entrega_id = ${entregaId}`;
         const t = yield* trabalho(k, row.trabalho_id);
         if (resultado === "conflito") {
           if (naoTerminou(t.estado)) {
@@ -835,8 +903,6 @@ const make = Effect.gen(function* () {
           }
           return null;
         }
-        yield* sql`UPDATE entregas SET confirmada_em = COALESCE(confirmada_em, ${yield* agora})
-                   WHERE vinculo = ${k} AND entrega_id = ${entregaId}`;
         if (d.tipo !== "aceita" || t.estado !== "entregue") return null;
         yield* sql`UPDATE conversas SET thread_associada = COALESCE(thread_associada, ${d.aceitacao.threadId})
                    WHERE vinculo = ${k} AND conversa_id = ${t.conversa_id}`;
@@ -852,7 +918,12 @@ const make = Effect.gen(function* () {
       "observe",
       Effect.gen(function* () {
         const t = yield* trabalho(k, trabalhoId);
-        if (!ATIVOS.includes(t.estado)) return "fim" as const;
+        if (!ATIVOS.includes(t.estado)) {
+          // Its result stays as it was; only whether the conversation may go on is decided here.
+          if (o.type === "thread_lost") yield* bloquear(k, t.conversa_id, "thread_perdida");
+          else yield* conferida(k, t.conversa_id);
+          return "fim" as const;
+        }
         yield* sql`UPDATE trabalhos SET cursor = MAX(COALESCE(cursor, 0), ${o.sequence})
                    WHERE vinculo = ${k} AND trabalho_id = ${trabalhoId}`;
         switch (o.type) {
@@ -868,10 +939,12 @@ const make = Effect.gen(function* () {
           case "answer":
             yield* emitir(k, trabalhoId, { tipo: "resposta", texto: o.text });
             yield* encerrar(k, trabalhoId, "concluido");
+            yield* conferida(k, t.conversa_id);
             return "fim" as const;
           case "failure":
             yield* emitir(k, trabalhoId, { tipo: "falha", motivo: o.message });
             yield* encerrar(k, trabalhoId, "falhou");
+            yield* conferida(k, t.conversa_id);
             return "fim" as const;
           case "thread_lost":
             yield* perderThread(k, t);
@@ -945,9 +1018,10 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* garantirVinculo(v, k);
         if (yield* desligando(k)) return { type: "desligar" } satisfies Partida;
+        yield* sql`UPDATE conversas SET conferida = 0 WHERE vinculo = ${k}`;
         const resolvidas = yield* sql<{ readonly entrega_id: string; readonly desfecho: string }>`
           SELECT entrega_id, desfecho FROM entregas
-          WHERE vinculo = ${k} AND fase = 'resolvida' AND confirmada_em IS NULL ORDER BY rowid`;
+          WHERE vinculo = ${k} AND fase = 'resolvida' AND confirmacao IS NULL ORDER BY rowid`;
         const confirmar: Array<{ entregaId: string; recibo: Protocol.Recibo }> = [];
         for (const r of resolvidas) {
           const recibo = reciboDe(yield* desfechoJson.decode(r.desfecho));

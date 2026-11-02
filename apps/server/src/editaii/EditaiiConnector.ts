@@ -17,6 +17,7 @@ import * as Stream from "effect/Stream";
 import { forkParked } from "../serverActivation.ts";
 import * as Connection from "./EditaiiConnection.ts";
 import * as Journal from "./EditaiiJournal.ts";
+import type * as Protocol from "./EditaiiProtocol.ts";
 import * as Adapter from "./EditaiiT3Adapter.ts";
 
 /** How long to wait for the Worker to have work again, or to retry a call that did not land. */
@@ -121,8 +122,10 @@ const make = Effect.fn("EditaiiConnector.make")(function* (
       return;
     }
     const tarefas = yield* FiberSet.make<void, Journal.EditaiiJournalError>();
+    // The outbox wakes when there may be something to send; the deliveries, when something went.
     const acordar = yield* Queue.sliding<void>(1);
     const avisar = Queue.offer(acordar, undefined).pipe(Effect.asVoid);
+    const enviou = yield* Queue.sliding<void>(1);
 
     /** Follows one confirmed job until it ends here, resuming after the last applied fact. */
     const seguir = Effect.fn("EditaiiConnector.follow")(function* (observado: Journal.Observado) {
@@ -167,14 +170,25 @@ const make = Effect.fn("EditaiiConnector.make")(function* (
       if (observado !== null) yield* acompanhar(observado);
     });
 
-    /** Takes a delivery from the journal's step to where only the Worker can move it. */
-    const conduzir = Effect.fn("EditaiiConnector.drive")(function* (passo: Journal.Passo) {
+    /**
+     * Takes a delivery through the journal's steps to where only the Worker can move it. Says
+     * whether it settled without a receipt, in which case the Worker serves it again until the
+     * events it owes reach it.
+     */
+    const conduzir = Effect.fn("EditaiiConnector.drive")(function* (entrega: Protocol.Entrega) {
+      const receber = Effect.flatMap(configuracao, (c) => journal.receber(v, entrega, c));
+      let passo = yield* receber;
       for (;;) {
         switch (passo.type) {
           case "aguardar":
-            return;
+            return true;
           case "confirmar":
-            return yield* confirmar(passo.entregaId, passo.recibo);
+            yield* confirmar(passo.entregaId, passo.recibo);
+            return false;
+          case "conferir":
+            yield* seguir(passo.observado);
+            passo = yield* receber;
+            break;
           case "executar":
             passo = yield* journal.resolver(
               v,
@@ -200,12 +214,14 @@ const make = Effect.fn("EditaiiConnector.make")(function* (
           yield* Effect.sleep(PAUSA);
           continue;
         }
-        const passo = yield* journal.receber(v, entrega, yield* configuracao);
-        yield* conduzir(passo);
+        const semRecibo = yield* conduzir(entrega);
         // What the delivery's outcome owes the Worker goes now, not at the next poll.
         yield* avisar;
-        // Settled without a receipt: the Worker serves it until the events owed reach it.
-        if (passo.type === "aguardar") yield* Effect.sleep(PAUSA);
+        if (semRecibo) {
+          yield* Queue.take(enviou).pipe(
+            Effect.timeoutOrElse({ duration: PAUSA, orElse: () => Effect.void }),
+          );
+        }
       }
     });
 
@@ -224,14 +240,22 @@ const make = Effect.fn("EditaiiConnector.make")(function* (
           ),
           Effect.catch(() => Effect.sleep(PAUSA).pipe(Effect.as("repetir" as const))),
         );
-        if (resultado !== "repetir") yield* journal.eventoEnviado(v, evento, resultado);
+        if (resultado === "repetir") continue;
+        yield* journal.eventoEnviado(v, evento, resultado);
+        yield* Queue.offer(enviou, undefined);
       }
     });
 
-    for (const { entregaId, recibo } of partida.confirmar) yield* confirmar(entregaId, recibo);
+    // A receipt the Worker does not take yet holds back new deliveries, not the jobs already running.
     for (const observado of partida.observar) yield* acompanhar(observado);
     yield* FiberSet.run(tarefas, enviar);
-    yield* FiberSet.run(tarefas, entregas);
+    yield* FiberSet.run(
+      tarefas,
+      Effect.gen(function* () {
+        for (const { entregaId, recibo } of partida.confirmar) yield* confirmar(entregaId, recibo);
+        return yield* entregas;
+      }),
+    );
     return yield* FiberSet.join(tarefas);
   });
 
@@ -256,8 +280,10 @@ const make = Effect.fn("EditaiiConnector.make")(function* (
   const desligar = Effect.fn("EditaiiConnector.desligar")(function* (
     vinculo: Connection.EditaiiVinculo,
   ) {
-    yield* journal.desligar(vinculo);
-    yield* connection.disconnect(vinculo);
+    // Once the intent is written, the disconnect completes even if the caller goes away.
+    yield* journal
+      .desligar(vinculo)
+      .pipe(Effect.andThen(connection.disconnect(vinculo)), Effect.uninterruptible);
   });
 
   return EditaiiConnector.of({ desligar });
