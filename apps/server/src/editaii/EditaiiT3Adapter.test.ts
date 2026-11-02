@@ -34,10 +34,13 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as Receipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as Worker from "../orchestration-v2/EffectWorker.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { LiveStreamBufferError } from "../orchestration-v2/LiveStreamBudget.ts";
 import * as Launch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as Registry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as Recovery from "../orchestration-v2/ProviderRuntimeRecoveryService.ts";
 import * as Harness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
@@ -245,6 +248,7 @@ const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
   const finish = Effect.fn("EditaiiT3Adapter.testFinish")(function* (
     turn: ProviderAdapter.ProviderAdapterV2TurnInput,
     text: string | null,
+    withTurnItem = true,
   ) {
     const engine = yield* Orchestrator.OrchestratorV2;
     const worker = yield* Worker.OrchestrationEffectWorkerV2;
@@ -253,7 +257,7 @@ const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
     assert.isDefined(providerTurn);
     if (providerTurn === undefined) return yield* Effect.die("provider turn missing");
     const now = yield* DateTime.now;
-    if (text !== null)
+    if (text !== null && withTurnItem)
       yield* Queue.offer(events, {
         type: "turn_item.updated",
         driver,
@@ -500,6 +504,7 @@ it.effect("compares the complete acceptance and emits a proven final answer afte
           { ...acceptance, threadId: ThreadId.make("other") },
           { ...acceptance, messageId: MessageId.make("other") },
           { ...acceptance, runId: RunId.make("other") },
+          { ...acceptance, commandIds: acceptance.commandIds.slice(0, 1) },
         ])
           assert.equal((yield* adapter.inspect(request, incompatible)).type, "mismatch");
         yield* h.finish(turn, "Result for this run");
@@ -527,6 +532,24 @@ it.effect("does not turn a completed run without assistant text into a placehold
         const observed = yield* Stream.runCollect(adapter.observe(acceptance));
         assert.equal(observed[0]?.type, "failure");
         assert.isFalse(observed.some((o) => o.type === "answer"));
+      }).pipe(Effect.provide(h.layer));
+    }),
+  ),
+);
+
+it.effect("does not take an assistant message that T3 never recorded as a turn item", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* harness("editaii-no-item");
+      yield* Effect.gen(function* () {
+        const adapter = yield* Adapter.EditaiiT3Adapter;
+        const { acceptance, turn } = yield* h.start(plan("no-item"));
+        yield* h.finish(turn, "Text without its turn item", false);
+        const observed = yield* Stream.runCollect(adapter.observe(acceptance));
+        assert.deepEqual(
+          observed.map((o) => o.type),
+          ["failure"],
+        );
       }).pipe(Effect.provide(h.layer));
     }),
   ),
@@ -910,6 +933,171 @@ it.effect("distinguishes a permanent rejection from an unreadable acceptance", (
           assert.equal(result._tag, "Failure");
           if (result._tag === "Failure") assert.equal(result.failure._tag, "EditaiiT3ReadError");
         }).pipe(Effect.provide(Adapter.layer.pipe(Layer.provide(unreadable), Layer.fresh)));
+      }).pipe(Effect.provide(h.layer));
+    }),
+  ),
+);
+
+it.effect(
+  "keeps asking a question T3 recovered after a restart and follows the run its answer starts",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness("editaii-recovered-question");
+        yield* Effect.gen(function* () {
+          const adapter = yield* Adapter.EditaiiT3Adapter;
+          const worker = yield* Worker.OrchestrationEffectWorkerV2;
+          const { acceptance, turn } = yield* h.start(plan("recovered-question"));
+          const requestId = yield* h.question(turn, "question");
+          const approvalId = yield* h.question(turn, "approval");
+          // The startup reconcile cancels the run, turns the live question into one answered by
+          // message, and expires the approval.
+          yield* Recovery.ProviderRuntimeRecoveryService.use((r) => r.reconcile("startup")).pipe(
+            Effect.provide(
+              Recovery.layer.pipe(
+                // Reads and writes the same database the harness runs on.
+                Layer.provide(
+                  Layer.mergeAll(
+                    ProjectionStore.layer,
+                    EffectOutbox.layer,
+                    IdAllocator.layer,
+                    Settings.layerTest(),
+                  ),
+                ),
+              ),
+            ),
+          );
+          // One observer follows the whole job: the ended run must not end it while a question waits.
+          const asked = yield* Deferred.make<void>();
+          const observing = yield* adapter.observe(acceptance).pipe(
+            Stream.tap((o) =>
+              o.type === "question" ? Deferred.succeed(asked, undefined) : Effect.void,
+            ),
+            Stream.runCollect,
+            Effect.forkScoped,
+          );
+          yield* Deferred.await(asked);
+          const answer: Adapter.AnswerPlan = {
+            version: 1,
+            threadId: turn.threadId,
+            requestId,
+            commandId: CommandId.make("recovered-answer"),
+            answers: Object.fromEntries([
+              ["constructor", "Yes"],
+              ["__proto__", "Safe"],
+            ]),
+          };
+          assert.deepEqual(
+            yield* adapter.respond({
+              ...answer,
+              requestId: approvalId,
+              commandId: CommandId.make("expired-approval"),
+            }),
+            { type: "not_resumable" },
+          );
+          const running = yield* watch(
+            (e) => e.type === "provider-turn.updated" && e.payload.status === "running",
+          );
+          assert.deepEqual(yield* adapter.respond(answer), {
+            type: "accepted",
+            commandId: answer.commandId,
+          });
+          yield* worker.drain();
+          const continued = yield* Queue.take(h.started);
+          yield* Fiber.join(running);
+          assert.notEqual(continued.runId, acceptance.runId);
+          yield* h.finish(continued, "Answer after the restart");
+          const observed = yield* Fiber.join(observing);
+          assert.isFalse(observed.some((o) => o.type === "failure"));
+          assert.include(
+            observed.find((o) => o.type === "question"),
+            { requestId, capability: "message" },
+          );
+          assert.include(observed.at(-1), {
+            type: "answer",
+            runId: continued.runId,
+            text: "Answer after the restart",
+          });
+        }).pipe(Effect.provide(h.layer));
+      }),
+    ),
+);
+
+it.effect("answers a request T3 cancelled as not resumable, not as answered elsewhere", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* harness("editaii-cancelled-request");
+      yield* Effect.gen(function* () {
+        const adapter = yield* Adapter.EditaiiT3Adapter;
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const receipts = yield* Receipts.CommandReceiptStoreV2;
+        const { turn } = yield* h.start(plan("cancelled-request"));
+        const requestId = yield* h.question(turn, "question");
+        const request = (yield* engine.getThreadProjection(turn.threadId)).runtimeRequests.find(
+          (r) => r.id === requestId,
+        );
+        if (!request) return yield* Effect.die("request missing");
+        const cancelled = yield* watch(
+          (e) => e.type === "runtime-request.updated" && e.payload.status === "cancelled",
+        );
+        const now = yield* DateTime.now;
+        yield* Queue.offer(h.events, {
+          type: "runtime_request.updated",
+          driver,
+          threadId: turn.threadId,
+          runtimeRequest: { ...request, status: "cancelled", resolvedAt: now },
+        });
+        yield* Fiber.join(cancelled);
+        const commandId = CommandId.make("cancelled-answer");
+        assert.deepEqual(
+          yield* adapter.respond({
+            version: 1,
+            threadId: turn.threadId,
+            requestId,
+            commandId,
+            answers: { constructor: "Yes" },
+          }),
+          { type: "not_resumable" },
+        );
+        assert.isTrue(Option.isNone(yield* receipts.getByCommandId(commandId)));
+      }).pipe(Effect.provide(h.layer));
+    }),
+  ),
+);
+
+it.effect("reports a thread deleted between its shell and snapshot reads as lost", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* harness("editaii-deleted-between-reads");
+      yield* Effect.gen(function* () {
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const request = plan("deleted-between-reads");
+        const { acceptance, turn } = yield* h.start(request);
+        yield* h.finish(turn, "Answer before deletion");
+        const shell = yield* engine.getThreadShell(request.threadId);
+        assert.isNotNull(shell);
+        yield* engine.dispatch({
+          type: "thread.delete",
+          commandId: CommandId.make("delete-thread"),
+          threadId: request.threadId,
+        });
+        // The shell was read just before the deletion committed.
+        const stale = Layer.succeed(Orchestrator.OrchestratorV2, {
+          ...engine,
+          getThreadShell: () => Effect.succeed(shell),
+        });
+        yield* Effect.gen(function* () {
+          const adapter = yield* Adapter.EditaiiT3Adapter;
+          assert.deepEqual(yield* adapter.inspect(request, acceptance), {
+            type: "mismatch",
+            reason: "thread",
+          });
+          const observed = yield* Stream.runCollect(adapter.observe(acceptance));
+          assert.deepEqual(
+            observed.map((o) => o.type),
+            ["thread_lost"],
+          );
+        }).pipe(Effect.provide(Adapter.layer.pipe(Layer.provide(stale), Layer.fresh)));
       }).pipe(Effect.provide(h.layer));
     }),
   ),

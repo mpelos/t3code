@@ -170,10 +170,22 @@ export class EditaiiT3Adapter extends Context.Service<
       plan: RequestPlan,
       known: Acceptance | null,
     ) => Effect.Effect<Inspection, T3ReadError>;
+    /**
+     * Follows the work the acceptance started, across the runs that carry it (see `runLineage`).
+     * A question still pending is reported even when its run has ended: a T3 restart ends the run
+     * but keeps the question answerable by message. Only when nothing waits for a person does the
+     * latest run's end become the answer or the failure.
+     */
     readonly observe: (
       acceptance: Acceptance,
       afterSequence?: number,
     ) => Stream.Stream<Observation, T3ReadError>;
+    /**
+     * Answers a request. `superseded`: someone answered it in T3. `not_resumable`: T3 cancelled or
+     * expired it, or can no longer deliver an answer. The answers must cover every required question
+     * by id; the connector builds them from the Editaii form, which enforces that. T3 may reject an
+     * incomplete answer permanently, and that comes back as `unknown`.
+     */
     readonly respond: (plan: AnswerPlan) => Effect.Effect<AnswerResult>;
   }
 >()("t3/editaii/EditaiiT3Adapter") {}
@@ -216,9 +228,11 @@ const make = Effect.gen(function* () {
   });
   const snapshot = Effect.fn("EditaiiT3Adapter.snapshot")(function* (threadId: ThreadId) {
     return yield* Effect.gen(function* () {
-      const shell = yield* engine.getThreadShell(threadId);
-      if (shell === null || shell.deletedAt !== null) return null;
-      return yield* engine.getThreadSnapshot(threadId);
+      // The shell only says whether the thread exists. Deletion is read from the snapshot itself, so
+      // a thread deleted between the two reads is never taken for a live one.
+      if ((yield* engine.getThreadShell(threadId)) === null) return null;
+      const state = yield* engine.getThreadSnapshot(threadId);
+      return state.projection.thread.deletedAt === null ? state : null;
     }).pipe(Effect.mapError((cause) => new T3ReadError({ threadId, cause })));
   });
   const evidence = Effect.fn("EditaiiT3Adapter.evidence")(function* (
@@ -467,8 +481,9 @@ const make = Effect.gen(function* () {
                 cause: { reason: "request-missing" },
               }),
             };
-          if (request.status !== "pending") return { type: "superseded" };
-          if (request.responseCapability.type === "not_resumable") return { type: "not_resumable" };
+          if (request.status === "resolved") return { type: "superseded" };
+          if (request.status !== "pending" || request.responseCapability.type === "not_resumable")
+            return { type: "not_resumable" };
           yield* engine.dispatch({
             type: "runtime-request.respond",
             commandId: plan.commandId,
@@ -491,6 +506,14 @@ const make = Effect.gen(function* () {
   return EditaiiT3Adapter.of({ accept, inspect, observe, respond });
 });
 
+const ENDED: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "rolled_back",
+]);
+
 function observationsFor(
   projection: OrchestrationV2ThreadProjection,
   acceptance: Acceptance,
@@ -500,55 +523,21 @@ function observationsFor(
   if (!lineage) return [{ type: "thread_lost", sequence, key: "lost:run", reason: "run" }];
   const { run, related } = lineage;
   const base = { sequence, runId: run.id };
-  if (run.status === "completed") {
-    const result = subagentResultForRun(projection, run);
-    const message = projection.messages.find(
-      (m) =>
-        m.id === result.messageId && m.runId === run.id && m.role === "assistant" && !m.streaming,
-    );
-    const item = projection.turnItems.find(
-      (i) =>
-        i.id === result.turnItemId &&
-        i.type === "assistant_message" &&
-        i.runId === run.id &&
-        !i.streaming &&
-        i.messageId === result.messageId,
-    );
-    if (
-      result.messageId === null ||
-      message === undefined ||
-      item === undefined ||
-      !result.text.trim()
-    )
-      return [
-        {
-          ...base,
-          type: "failure",
-          key: `no-result:${run.id}`,
-          reason: "no-result",
-          message: "T3 completed without a final assistant result.",
-        },
-      ];
+  const requests = requestObservations(projection, related, base);
+  if (!ENDED.has(run.status))
     return [
-      {
-        ...base,
-        type: "answer",
-        key: `answer:${run.id}:${result.messageId}`,
-        messageId: result.messageId,
-        text: result.text,
-      },
+      ...requests,
+      { ...base, type: "running", key: `run:${run.id}:${run.status}`, status: run.status },
     ];
-  }
-  if (["failed", "cancelled", "interrupted", "rolled_back"].includes(run.status))
-    return [
-      {
-        ...base,
-        type: "failure",
-        key: `ended:${run.id}:${run.status}`,
-        reason: "run-ended",
-        message: `The T3 run ended with status ${run.status}.`,
-      },
-    ];
+  if (requests.some((o) => o.type === "question" || o.type === "approval")) return requests;
+  return [...requests, outcome(projection, run, base)];
+}
+
+function requestObservations(
+  projection: OrchestrationV2ThreadProjection,
+  related: ReadonlySet<RunId>,
+  base: { readonly sequence: number; readonly runId: RunId },
+): Observation[] {
   const nodes = new Set(
     projection.nodes.filter((n) => n.runId !== null && related.has(n.runId)).map((n) => n.id),
   );
@@ -558,7 +547,7 @@ function observationsFor(
     if (request.status !== "pending") {
       observations.push({
         type: "resolved",
-        sequence,
+        sequence: base.sequence,
         key: `request:${request.id}:${request.status}`,
         requestId: request.id,
         status: request.status,
@@ -588,27 +577,92 @@ function observationsFor(
         description: item.prompt ?? item.reason ?? "An approval is required in T3.",
       });
   }
-  observations.push({
-    ...base,
-    type: "running",
-    key: `run:${run.id}:${run.status}`,
-    status: run.status,
-  });
   return observations;
 }
 
+function outcome(
+  projection: OrchestrationV2ThreadProjection,
+  run: OrchestrationV2Run,
+  base: { readonly sequence: number; readonly runId: RunId },
+): Observation {
+  if (run.status !== "completed")
+    return {
+      ...base,
+      type: "failure",
+      key: `ended:${run.id}:${run.status}`,
+      reason: "run-ended",
+      message: `The T3 run ended with status ${run.status}.`,
+    };
+  const result = subagentResultForRun(projection, run);
+  const message = projection.messages.find(
+    (m) =>
+      m.id === result.messageId && m.runId === run.id && m.role === "assistant" && !m.streaming,
+  );
+  const item = projection.turnItems.find(
+    (i) =>
+      i.id === result.turnItemId &&
+      i.type === "assistant_message" &&
+      i.runId === run.id &&
+      !i.streaming &&
+      i.messageId === result.messageId,
+  );
+  if (
+    result.messageId === null ||
+    message === undefined ||
+    item === undefined ||
+    !result.text.trim()
+  )
+    return {
+      ...base,
+      type: "failure",
+      key: `no-result:${run.id}`,
+      reason: "no-result",
+      message: "T3 completed without a final assistant result.",
+    };
+  return {
+    ...base,
+    type: "answer",
+    key: `answer:${run.id}:${result.messageId}`,
+    messageId: result.messageId,
+    text: result.text,
+  };
+}
+
+// T3 sends an answer given by message as this user message (Orchestrator's
+// dispatchRuntimeRequestRespond); it starts a run or steers the active one.
+const answerMessageId = (requestId: RuntimeRequestId) =>
+  MessageId.make(`async-answer:${requestId}`);
+
+/**
+ * The runs that carry the accepted work: the accepted run, the run T3 restarted it as, and the run
+ * that received an answer given by message to one of their questions. The latest of them is the
+ * current run, whose status decides the outcome.
+ */
 function runLineage(projection: OrchestrationV2ThreadProjection, rootId: RunId) {
   const root = projection.runs.find((r) => r.id === rootId);
   if (!root) return null;
+  const lineage = [root];
   const related = new Set<RunId>([root.id]);
-  let run = root;
-  for (let hops = 0; hops < projection.runs.length; hops++) {
-    const next = projection.runs.find((r) => r.restartContinuationOfRunId === run.id);
-    if (!next || related.has(next.id)) break;
-    related.add(next.id);
-    run = next;
+  // Iterating while appending also visits the runs each step adds.
+  for (const run of lineage) {
+    const nodes = new Set(projection.nodes.filter((n) => n.runId === run.id).map((n) => n.id));
+    const answers = new Set(
+      projection.runtimeRequests
+        .filter((r) => nodes.has(r.nodeId))
+        .map((r) => answerMessageId(r.id)),
+    );
+    const answeredIn = new Set(
+      projection.messages.filter((m) => answers.has(m.id)).map((m) => m.runId),
+    );
+    for (const next of projection.runs) {
+      if (related.has(next.id)) continue;
+      if (next.restartContinuationOfRunId !== run.id && !answeredIn.has(next.id)) continue;
+      related.add(next.id);
+      lineage.push(next);
+    }
   }
-  return { run, related };
+  const current = lineage.reduce((latest, run) => (run.ordinal > latest.ordinal ? run : latest));
+  return { run: current, related };
 }
 
 export const layer = Layer.effect(EditaiiT3Adapter, make);
