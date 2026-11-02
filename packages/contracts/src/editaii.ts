@@ -113,7 +113,7 @@ export const EditaiiJournalProblem = Schema.Literals([
 ]);
 export type EditaiiJournalProblem = typeof EditaiiJournalProblem.Type;
 
-function editaiiJournalProblemMessage(reason: EditaiiJournalProblem): string {
+export function editaiiJournalProblemMessage(reason: EditaiiJournalProblem): string {
   switch (reason) {
     case "future_version":
       return "The Editaii journal on this computer was written by a newer T3. Update T3.";
