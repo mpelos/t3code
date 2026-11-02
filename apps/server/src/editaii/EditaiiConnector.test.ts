@@ -408,6 +408,10 @@ const fakeT3 = (mudou: Sinal) => {
     const observacao: Adapter.Observation = { ...f(runId), sequence, key: `fato:${sequence}` };
     yield* SubscriptionRef.update(yield* run(runId), (log) => [...log, observacao]);
   });
+  /** The T3 lost the last fact of the run of request `n`, as a restored backup would. */
+  const esquecer = Effect.fn("test.fakeT3.esquecer")(function* (n: number) {
+    yield* SubscriptionRef.update(yield* run(aceitacaoDe(n).runId), (log) => log.slice(0, -1));
+  });
   /** The thread of request `n` is gone from the T3. */
   const perder = Effect.fn("test.fakeT3.perder")(function* (n: number) {
     perdidos.add(aceitacaoDe(n).runId);
@@ -480,7 +484,7 @@ const fakeT3 = (mudou: Sinal) => {
           : { type: "absent" },
       ),
   });
-  return { t, adapter, fato, perder };
+  return { t, adapter, fato, esquecer, perder };
 };
 
 const pergunta =
@@ -657,6 +661,7 @@ const maquina = Effect.gen(function* () {
     worker,
     t3: t3.t,
     fato: t3.fato,
+    esquecer: t3.esquecer,
     perder: t3.perder,
     ligar,
     falhar,
@@ -917,6 +922,27 @@ describe("EditaiiConnector", () => {
         yield* m.quando(() => m.worker.estado(2) === "em_execucao");
         assert.equal(m.t3.chamadasAccept, 2);
         assert.deepEqual(tipos(m.worker.aplicados), ["trabalho-1:1:resposta"]);
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped),
+    );
+
+    it.effect("the T3 lost its end: the next request waits, and stops on another end", () =>
+      Effect.gen(function* () {
+        const m = yield* maquina;
+        yield* concluido(m);
+        yield* m.esquecer(1);
+
+        yield* m.ligar;
+        m.worker.pedir(2);
+        yield* m.quando(() => m.worker.estado(2) === "entregue");
+        yield* umMinuto;
+        assert.equal(m.worker.estado(2), "entregue");
+        assert.equal(m.t3.chamadasAccept, 1);
+
+        yield* m.fato(1, resposta("Outra"));
+        yield* m.quando(() => m.worker.estado(2) === "reconciliacao");
+        assert.equal(m.t3.chamadasAccept, 1);
+        assert.equal(m.worker.estado(1), "concluido");
         assert.deepEqual(m.worker.invalidos, []);
       }).pipe(Effect.scoped),
     );

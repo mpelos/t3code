@@ -72,8 +72,8 @@ export type Execucao =
 /** What the connector does next with a delivery. */
 export type Passo =
   /**
-   * Before the conversation goes on, follow its last ended job in the T3 until the first fact,
-   * which tells whether the T3 still has it; then receive the delivery again.
+   * Before the conversation goes on, follow its last ended job in the T3 until the T3 shows the
+   * fact that ended it, or another end; then receive the delivery again.
    */
   | { readonly type: "conferir"; readonly observado: Observado }
   /** Invoke the T3 now. */
@@ -148,8 +148,8 @@ export interface EditaiiJournalShape {
   ) => Effect.Effect<Observado | null, EditaiiJournalError>;
   /**
    * Projects one observation of a followed job; `fim` once the job ended here. A job that already
-   * ended is only followed to check its conversation: a lost thread stops the conversation, and
-   * any other fact shows the T3 still has it.
+   * ended is only followed to check its conversation: the fact that ended it lets it go on, and
+   * another end or a lost thread stops it.
    */
   readonly observar: (
     vinculo: EditaiiVinculo,
@@ -209,6 +209,9 @@ const MIGRATIONS: ReadonlyArray<ReadonlyArray<string>> = [
       estado TEXT NOT NULL CHECK (estado IN
         ('entregue', 'em_execucao', 'aguardando_pessoa', 'acao_no_t3', 'concluido', 'falhou', 'parado')),
       cursor INTEGER,
+      -- The key of the T3 fact that ended the job here, its final answer or failure: after a
+      -- restart, the conversation goes on only once the T3 shows that same fact again.
+      marco_t3 TEXT,
       retido_em TEXT,
       PRIMARY KEY (vinculo, trabalho_id),
       FOREIGN KEY (vinculo, conversa_id) REFERENCES conversas (vinculo, conversa_id),
@@ -410,6 +413,7 @@ type TrabalhoRow = {
   readonly entrega_pedido: string;
   readonly estado: string;
   readonly cursor: number | null;
+  readonly marco_t3: string | null;
 };
 type PendenciaRow = {
   readonly request_id: string;
@@ -447,7 +451,7 @@ const make = Effect.gen(function* () {
 
   const trabalho = Effect.fn(function* (k: string, trabalhoId: string) {
     const [row] = yield* sql<TrabalhoRow>`
-      SELECT trabalho_id, conversa_id, entrega_pedido, estado, cursor FROM trabalhos
+      SELECT trabalho_id, conversa_id, entrega_pedido, estado, cursor, marco_t3 FROM trabalhos
       WHERE vinculo = ${k} AND trabalho_id = ${trabalhoId}`;
     if (row === undefined) return yield* conflict(`unknown job ${trabalhoId}`);
     return row;
@@ -491,6 +495,20 @@ const make = Effect.gen(function* () {
     yield* setEstado(k, trabalhoId, estado);
     yield* sql`UPDATE pendencias SET estado = 'encerrada', encerramento = 'terminal'
                WHERE vinculo = ${k} AND trabalho_id = ${trabalhoId} AND estado != 'encerrada'`;
+  });
+  const conferida = (k: string, conversaId: string) =>
+    sql`UPDATE conversas SET conferida = 1 WHERE vinculo = ${k} AND conversa_id = ${conversaId}`;
+  /** The T3 ended the job with fact `marco`, which a later check must find again; seen live, it is. */
+  const encerradoPeloT3 = Effect.fn(function* (
+    k: string,
+    t: TrabalhoRow,
+    estado: "concluido" | "falhou",
+    marco: string,
+  ) {
+    yield* encerrar(k, t.trabalho_id, estado);
+    yield* sql`UPDATE trabalhos SET marco_t3 = ${marco}
+               WHERE vinculo = ${k} AND trabalho_id = ${t.trabalho_id}`;
+    yield* conferida(k, t.conversa_id);
   });
   const perderThread = Effect.fn(function* (k: string, t: TrabalhoRow) {
     yield* emitir(k, t.trabalho_id, { tipo: "thread_perdida" });
@@ -656,18 +674,17 @@ const make = Effect.gen(function* () {
       WHERE vinculo = ${k} AND conversa_id = ${conversaId}`;
     return row;
   });
-  const conferida = (k: string, conversaId: string) =>
-    sql`UPDATE conversas SET conferida = 1 WHERE vinculo = ${k} AND conversa_id = ${conversaId}`;
   /** The conversation's last job the T3 took that has ended here, to check the T3 still has it. */
   const ultimoEncerrado = Effect.fn(function* (k: string, conversaId: string) {
-    const [t] = yield* sql<TrabalhoRow>`
-      SELECT t.trabalho_id, t.conversa_id, t.entrega_pedido, t.estado, t.cursor FROM trabalhos t
+    const [ultimo] = yield* sql<{ readonly trabalho_id: string }>`
+      SELECT t.trabalho_id FROM trabalhos t
       JOIN entregas e ON e.vinculo = t.vinculo AND e.entrega_id = t.entrega_pedido
       WHERE t.vinculo = ${k} AND t.conversa_id = ${conversaId}
         AND t.estado IN ('concluido', 'falhou', 'parado')
         AND json_extract(e.desfecho, '$.tipo') = 'aceita'
       ORDER BY t.rowid DESC LIMIT 1`;
-    if (t === undefined) return undefined;
+    if (ultimo === undefined) return undefined;
+    const t = yield* trabalho(k, ultimo.trabalho_id);
     return {
       trabalhoId: t.trabalho_id,
       aceitacao: yield* aceitacaoDo(k, t),
@@ -920,9 +937,17 @@ const make = Effect.gen(function* () {
         const t = yield* trabalho(k, trabalhoId);
         if (!ATIVOS.includes(t.estado)) {
           // Its result stays as it was; only whether the conversation may go on is decided here.
-          if (o.type === "thread_lost") yield* bloquear(k, t.conversa_id, "thread_perdida");
-          else yield* conferida(k, t.conversa_id);
-          return "fim" as const;
+          // Without a T3 fact that ended it, any fact will do: the adapter shows none before it
+          // finds the request in the thread.
+          if (t.marco_t3 === null ? o.type !== "thread_lost" : o.key === t.marco_t3) {
+            yield* conferida(k, t.conversa_id);
+            return "fim" as const;
+          }
+          if (o.type === "answer" || o.type === "failure" || o.type === "thread_lost") {
+            yield* bloquear(k, t.conversa_id, "thread_perdida");
+            return "fim" as const;
+          }
+          return "seguir" as const;
         }
         yield* sql`UPDATE trabalhos SET cursor = MAX(COALESCE(cursor, 0), ${o.sequence})
                    WHERE vinculo = ${k} AND trabalho_id = ${trabalhoId}`;
@@ -938,13 +963,11 @@ const make = Effect.gen(function* () {
             return "seguir" as const;
           case "answer":
             yield* emitir(k, trabalhoId, { tipo: "resposta", texto: o.text });
-            yield* encerrar(k, trabalhoId, "concluido");
-            yield* conferida(k, t.conversa_id);
+            yield* encerradoPeloT3(k, t, "concluido", o.key);
             return "fim" as const;
           case "failure":
             yield* emitir(k, trabalhoId, { tipo: "falha", motivo: o.message });
-            yield* encerrar(k, trabalhoId, "falhou");
-            yield* conferida(k, t.conversa_id);
+            yield* encerradoPeloT3(k, t, "falhou", o.key);
             return "fim" as const;
           case "thread_lost":
             yield* perderThread(k, t);
@@ -1028,7 +1051,7 @@ const make = Effect.gen(function* () {
           if (recibo !== null) confirmar.push({ entregaId: r.entrega_id, recibo });
         }
         const ativos = yield* sql<TrabalhoRow>`
-          SELECT trabalho_id, conversa_id, entrega_pedido, estado, cursor FROM trabalhos
+          SELECT trabalho_id, conversa_id, entrega_pedido, estado, cursor, marco_t3 FROM trabalhos
           WHERE vinculo = ${k} AND estado IN ${sql.in(ATIVOS)} ORDER BY rowid`;
         const observar: Array<Observado> = [];
         for (const t of ativos) {

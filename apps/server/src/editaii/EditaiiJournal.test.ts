@@ -224,6 +224,12 @@ const answer = (text: string): Adapter.Observation => ({
   text,
   messageId: MessageId.make("answer"),
 });
+const running = (): Adapter.Observation => ({
+  ...origem(`running:${sequence}`),
+  type: "running",
+  runId: run,
+  status: "running",
+});
 const failure = (message: string): Adapter.Observation => ({
   ...origem("failure"),
   type: "failure",
@@ -517,6 +523,8 @@ describe("EditaiiJournal deliveries", () => {
               },
             };
             assert.deepEqual(yield* j.receber(V1, terceiro, pronta), conferir);
+            // A fact on the way does not prove the T3 kept the end: the check goes on.
+            assert.strictEqual(yield* j.observar(V1, "trabalho-1", running()), "seguir");
             assert.deepEqual(yield* j.receber(V1, terceiro, pronta), conferir);
             assert.strictEqual(yield* j.observar(V1, "trabalho-1", answer("Pronto")), "fim");
             assert.strictEqual((yield* j.receber(V1, terceiro, pronta)).type, "executar");
@@ -527,7 +535,11 @@ describe("EditaiiJournal deliveries", () => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect("a conversation whose last job the T3 lost stops; that job's result stays", () =>
+  it.effect.each([
+    { caso: "lost its thread", visto: perdida },
+    { caso: "ended it with another answer", visto: () => ({ ...answer("Outra"), key: "outra" }) },
+    { caso: "ended it with a failure", visto: () => failure("Caiu") },
+  ])("a conversation whose last job the T3 $caso stops; that job's result stays", ({ visto }) =>
     Effect.gen(function* () {
       const a = yield* ambiente;
       const plano = yield* usar(a, (j) =>
@@ -543,7 +555,7 @@ describe("EditaiiJournal deliveries", () => {
           yield* j.partida(V1);
           const seguinte = pedido(2, { thread_t3: plano.threadId });
           assert.strictEqual((yield* j.receber(V1, seguinte, pronta)).type, "conferir");
-          assert.strictEqual(yield* j.observar(V1, "trabalho-1", perdida()), "fim");
+          assert.strictEqual(yield* j.observar(V1, "trabalho-1", visto()), "fim");
           assert.deepEqual(yield* j.receber(V1, seguinte, pronta), { type: "aguardar" });
           assert.deepEqual(tipos(yield* enviar(j)), ["trabalho-2:1:thread_perdida"]);
         }),
@@ -563,6 +575,33 @@ describe("EditaiiJournal deliveries", () => {
           const { plano } = yield* iniciar(j);
           yield* j.observar(V1, "trabalho-1", observacao());
           const seguinte = pedido(2, { thread_t3: plano.threadId });
+          assert.strictEqual((yield* j.receber(V1, seguinte, pronta)).type, "executar");
+        }),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("after a restart, a job that ended here without a T3 end is checked by any fact", () =>
+    Effect.gen(function* () {
+      const a = yield* ambiente;
+      const plano = yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          const { plano } = yield* iniciar(j);
+          yield* j.observar(V1, "trabalho-1", question("X"));
+          const x = resposta(1, 1, "X", { p1: { texto: "ok" } }, plano.threadId);
+          executar(yield* j.receber(V1, x, pronta));
+          // The T3 could no longer take the answer: the job failed here, not in the T3.
+          yield* j.resolver(V1, x.entrega_id, { tipo: "nao_retomavel" });
+          yield* enviar(j);
+          return plano;
+        }),
+      );
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          yield* j.partida(V1);
+          const seguinte = pedido(2, { thread_t3: plano.threadId });
+          assert.strictEqual((yield* j.receber(V1, seguinte, pronta)).type, "conferir");
+          assert.strictEqual(yield* j.observar(V1, "trabalho-1", running()), "fim");
           assert.strictEqual((yield* j.receber(V1, seguinte, pronta)).type, "executar");
         }),
       );
