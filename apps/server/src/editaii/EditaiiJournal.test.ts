@@ -906,7 +906,9 @@ describe("EditaiiJournal requests", () => {
             assert.deepEqual(yield* j.resolver(V1, y.entrega_id, { tipo: "superada" }), {
               type: "aguardar",
             });
-            // The T3's own report of the same closing adds nothing.
+            // A read older than the one that saw the T3 take it is no regression.
+            assert.strictEqual(yield* j.observar(V1, "trabalho-1", question("Y")), "seguir");
+            // The wait ends when the job's observations show it closed.
             yield* j.observar(V1, "trabalho-1", resolved("Y"));
 
             yield* j.observar(V1, "trabalho-1", question("Z"));

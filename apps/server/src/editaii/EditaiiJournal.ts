@@ -604,7 +604,8 @@ const make = Effect.gen(function* () {
       yield* selecionarProxima(k, trabalhoId);
       return "seguir" as const;
     }
-    // The T3 never reopens a request it closed; its observations of a job only move forward.
+    // Only the job's observations close a request, in order, and the T3 never reopens one it
+    // closed: seeing it pending again means the T3 went back.
     if (p.estado === "encerrada") {
       yield* perderThread(k, t);
       return "fim" as const;
@@ -878,13 +879,10 @@ const make = Effect.gen(function* () {
           case "incerta":
             if (naoTerminou(t.estado)) yield* perderThread(k, t);
             break;
-          case "superada": {
-            const execucao = yield* execucaoDe(entregaId, row);
-            if (execucao.tipo === "resposta") {
-              yield* fecharPendencia(k, t.trabalho_id, execucao.plano.requestId, "resolved");
-            }
+          // Someone answered in the T3 first. Its request closes when the job's observations show
+          // it, as every request does: this read is not ordered with theirs.
+          case "superada":
             break;
-          }
           case "nao_retomavel":
             if (naoTerminou(t.estado)) {
               yield* emitir(k, t.trabalho_id, {

@@ -14,6 +14,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Stream from "effect/Stream";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
 import * as Maquinas from "./EditaiiConnector.testkit.ts";
@@ -59,6 +60,35 @@ const contando = (chamadas: { accept: number; respond: number }) =>
             chamadas.respond += 1;
             return adapter.respond(plano);
           }),
+      });
+    }),
+  );
+
+/**
+ * The T3's adapter, holding each observation `escolhida` picks until `solta`, as a slow read would;
+ * `chegou` says one is held.
+ */
+const segurando = (
+  escolhida: (o: Adapter.Observation) => boolean,
+  chegou: Deferred.Deferred<void>,
+  solta: Deferred.Deferred<void>,
+) =>
+  Layer.effect(
+    Adapter.EditaiiT3Adapter,
+    Effect.gen(function* () {
+      const adapter = yield* Adapter.EditaiiT3Adapter;
+      return Adapter.EditaiiT3Adapter.of({
+        ...adapter,
+        observe: (acceptance, after) =>
+          adapter
+            .observe(acceptance, after)
+            .pipe(
+              Stream.tap((o) =>
+                escolhida(o)
+                  ? Deferred.succeed(chegou, undefined).pipe(Effect.andThen(Deferred.await(solta)))
+                  : Effect.void,
+              ),
+            ),
       });
     }),
   );
@@ -274,6 +304,73 @@ describe("EditaiiConnector over the real T3", () => {
         assert.strictEqual(m.worker.confirmacoes.length, 1);
         assert.deepEqual(m.worker.invalidos, []);
       }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "an answer the T3 took elsewhere, read before an older read of the job lands: no regression",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = yield* fs.makeTempDirectoryScoped();
+        const h = yield* T3.harness("editaii-connector-leitura-velha", `${dir}/t3.sqlite`, {
+          recoverOnStartup: true,
+        });
+        const m = yield* Maquinas.make(configuracao);
+        const antes = yield* m.ligar(h.layer);
+        const liberado = yield* noT3(antes)(h.release());
+        m.worker.pedir(1);
+        const turn = yield* noT3(antes)(h.beginTurn(liberado));
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+        const pergunta = yield* noT3(antes)(
+          h.question(turn, "question", "x", [
+            { id: "x", header: "Caminho", question: "Qual?", options: [], allowCustomAnswer: true },
+          ]),
+        );
+        yield* m.quando(() => m.worker.estado(1) === "aguardando_pessoa");
+        yield* antes.parar;
+
+        // After the T3 restarts, the job's first read finds the question pending, and is slow.
+        const chegou = yield* Deferred.make<void>();
+        const solta = yield* Deferred.make<void>();
+        const lenta = segurando(
+          (o) => o.type === "question" && o.requestId === pergunta,
+          chegou,
+          solta,
+        );
+        const depois = yield* m.ligar(lenta.pipe(Layer.provideMerge(h.layer)));
+        yield* Deferred.await(chegou);
+        // Meanwhile the person answers in the T3, then in the Editaii, which the T3 no longer takes.
+        yield* noT3(depois)(
+          Orchestrator.OrchestratorV2.use((engine) =>
+            engine.dispatch({
+              type: "runtime-request.respond",
+              commandId: CommandId.make("respondida-no-t3"),
+              threadId: turn.threadId,
+              requestId: pergunta,
+              answers: { x: "pela T3" },
+            }),
+          ),
+        );
+        const [intervencao] = m.worker.aplicados;
+        if (intervencao?.tipo !== "intervencao") return assert.fail("expected the intervention");
+        m.worker.responder(1, { [intervencao.perguntas[0]?.id ?? ""]: { texto: "pelo Editaii" } });
+        // Settled without a receipt; the wait ends only by the job's observations.
+        yield* m.pausa;
+        assert.strictEqual(m.worker.estado(1), "aguardando_pessoa");
+        yield* Deferred.succeed(solta, undefined);
+
+        const continuacao = yield* noT3(depois)(h.nextTurn());
+        assert.include(continuacao.message.text, "pela T3");
+        assert.notInclude(continuacao.message.text, "pelo Editaii");
+        yield* noT3(depois)(h.finish(continuacao, "Pronto, com a resposta dada no T3."));
+        yield* m.quando(() => m.worker.estado(1) === "concluido");
+        assert.deepEqual(Maquinas.tipos(m.worker.aplicados), [
+          "trabalho-1:1:intervencao",
+          "trabalho-1:2:retomado",
+          "trabalho-1:3:resposta",
+        ]);
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   it.effect(
