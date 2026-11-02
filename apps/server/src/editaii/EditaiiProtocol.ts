@@ -16,10 +16,15 @@ export const Conversa = Schema.Struct({
 });
 export type Conversa = typeof Conversa.Type;
 
-export const Respostas = Schema.Record(
-  Schema.String,
-  Schema.Union([Schema.String, Schema.Array(Schema.String)]),
-);
+/** What the person did for one question: picked options, by id, or wrote their own words. */
+export const Resposta = Schema.Union([
+  Schema.Struct({ opcoes: Schema.NonEmptyArray(Id) }),
+  Schema.Struct({ texto: Id }),
+]);
+export type Resposta = typeof Resposta.Type;
+
+/** One answer per question id, every question answered; the Worker checks them against the questions. */
+export const Respostas = Schema.Record(Schema.String, Resposta);
 export type Respostas = typeof Respostas.Type;
 
 export const EntregaPedido = Schema.Struct({
@@ -75,7 +80,8 @@ export const Pergunta = Schema.Struct({
   id: Id,
   titulo: Schema.String,
   pergunta: Id,
-  opcoes: Schema.Array(Schema.Struct({ rotulo: Id, descricao: Schema.String })),
+  /** `id` is unique in the question and is what an answer names; labels may repeat. */
+  opcoes: Schema.Array(Schema.Struct({ id: Id, rotulo: Id, descricao: Schema.String })),
   multipla: Schema.Boolean,
   livre: Schema.Boolean,
 });
