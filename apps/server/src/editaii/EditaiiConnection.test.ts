@@ -741,6 +741,84 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       }),
     );
 
+    // `startImmediately` runs the fork until it waits, here on the record's writes.
+    const OTHER_ORIGIN = "https://outro.example";
+    it.effect("one chosen while a new origin is being saved keeps both", () =>
+      Effect.gen(function* () {
+        const h = yield* harness();
+        const paused = yield* h.pauseNextSave(false);
+        const configuring = yield* Effect.forkChild(
+          h.connection.configure({ origin: OTHER_ORIGIN }),
+        );
+        yield* Deferred.await(paused.arrived);
+        const choosing = yield* Effect.forkChild(h.connection.chooseProject(PROJECT), {
+          startImmediately: true,
+        });
+        yield* Deferred.succeed(paused.resume, undefined);
+        yield* Fiber.join(configuring);
+        yield* Fiber.join(choosing);
+        expect(yield* savedRecord(h)).toMatchObject({
+          projectId: PROJECT,
+          link: { phase: "disconnected", origin: OTHER_ORIGIN },
+        });
+      }),
+    );
+
+    it.effect("a new origin saved while a project is being chosen keeps both", () =>
+      Effect.gen(function* () {
+        const h = yield* harness();
+        const paused = yield* h.pauseNextSave(false);
+        const choosing = yield* Effect.forkChild(h.connection.chooseProject(PROJECT));
+        yield* Deferred.await(paused.arrived);
+        const configuring = yield* Effect.forkChild(
+          h.connection.configure({ origin: OTHER_ORIGIN }),
+          { startImmediately: true },
+        );
+        yield* Deferred.succeed(paused.resume, undefined);
+        yield* Fiber.join(choosing);
+        yield* Fiber.join(configuring);
+        expect(yield* savedRecord(h)).toMatchObject({
+          projectId: PROJECT,
+          link: { phase: "disconnected", origin: OTHER_ORIGIN },
+        });
+      }),
+    );
+
+    it.effect("one chosen while a pairing saves its connection keeps the connection", () =>
+      Effect.gen(function* () {
+        const activating = yield* Deferred.make<void>();
+        const activate = yield* Deferred.make<void>();
+        const h = yield* harness({
+          reply: (request) =>
+            request.url.endsWith("/ativar")
+              ? Deferred.succeed(activating, undefined).pipe(
+                  Effect.andThen(Deferred.await(activate)),
+                  Effect.as(Response.json(MACHINE)),
+                )
+              : Effect.succeed(Response.json({ ...MACHINE, ativada_em: null })),
+        });
+        const url = yield* h.begin();
+        yield* callback(url);
+        yield* Deferred.await(activating);
+        const paused = yield* h.pauseNextSave(false);
+        yield* Deferred.succeed(activate, undefined);
+        yield* Deferred.await(paused.arrived);
+        const choosing = yield* Effect.forkChild(h.connection.chooseProject(PROJECT), {
+          startImmediately: true,
+        });
+        yield* Deferred.succeed(paused.resume, undefined);
+        yield* Fiber.join(choosing);
+        expect(yield* savedRecord(h)).toMatchObject({
+          projectId: PROJECT,
+          link: { phase: "connected" },
+        });
+        expect(yield* h.connection.state).toMatchObject({
+          status: "connected",
+          projectId: PROJECT,
+        });
+      }),
+    );
+
     it.effect("disconnecting keeps the origin and the project, and drops the credentials", () =>
       Effect.gen(function* () {
         const h = yield* harness({ initial: CONNECTED });

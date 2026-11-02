@@ -258,13 +258,15 @@ const make = Effect.gen(function* () {
     };
     return yield* SubscriptionRef.set(view, next);
   });
-  // Writes the whole record with one part replaced; callers hold `writes`, so a part written by
-  // one transition is never undone by another. A replacement may already be durable when
+  // Writes the whole record with one part replaced, reading the other part only when it runs.
+  // Callers hold `writes` from before the part they pass was decided, so a part written by one
+  // transition is never undone by another. A replacement may already be durable when
   // cancellation arrives; always finish its projection.
   const write = Effect.fn("EditaiiConnection.write")(function* (
-    next: Stored,
-    nextProject: ProjectId | null,
+    part: { readonly link: Stored } | { readonly projectId: ProjectId | null },
   ) {
+    const next = "link" in part ? part.link : stored;
+    const nextProject = "projectId" in part ? part.projectId : projectId;
     const json = yield* encodeRecord({
       version: 2,
       environmentId,
@@ -279,7 +281,6 @@ const make = Effect.gen(function* () {
     projectId = nextProject;
     yield* publish();
   }, Effect.uninterruptible);
-  const save = (next: Stored) => write(next, projectId);
   const assertReadable = Effect.fn("EditaiiConnection.assertReadable")(function* () {
     if (readFailure) return yield* readFailure;
   });
@@ -456,7 +457,7 @@ const make = Effect.gen(function* () {
           credential: record.credential,
           machine,
         };
-        yield* save(connected);
+        yield* write({ link: connected });
         yield* openSession(connected);
       }),
     );
@@ -590,7 +591,7 @@ const make = Effect.gen(function* () {
             client_id: clientId,
             client_secret: clientSecret,
           };
-          yield* save(record);
+          yield* write({ link: record });
           yield* runRedemption(record, session.scope);
           return HttpServerResponse.setHeader(
             HttpServerResponse.html(
@@ -686,7 +687,7 @@ const make = Effect.gen(function* () {
       parsed.hash
     )
       return yield* new EditaiiConnectionError({ reason: "configuration" });
-    yield* writes.withPermits(1)(save({ phase: "disconnected", origin: parsed.origin }));
+    yield* writes.withPermits(1)(write({ link: { phase: "disconnected", origin: parsed.origin } }));
   }, commands.withPermits(1));
 
   const startPairing = Effect.fn("EditaiiConnection.startPairing")(function* ({
@@ -727,7 +728,7 @@ const make = Effect.gen(function* () {
           yield* writes
             .withPermits(1)(
               Effect.gen(function* () {
-                yield* save(record);
+                yield* write({ link: record });
                 yield* Effect.sleep("10 minutes").pipe(
                   Effect.andThen(
                     writes.withPermits(1)(
@@ -787,7 +788,7 @@ const make = Effect.gen(function* () {
   ) {
     yield* Deferred.await(ready);
     yield* assertReadable();
-    yield* writes.withPermits(1)(write(stored, next));
+    yield* writes.withPermits(1)(write({ projectId: next }));
   });
 
   const disconnect = Effect.fn("EditaiiConnection.disconnect")(function* (
@@ -813,7 +814,9 @@ const make = Effect.gen(function* () {
         if (previous === false) return false;
         if (previous.released) yield* Scope.close(previous.released.scope, Exit.void);
         yield* closeSession;
-        yield* writes.withPermits(1)(save({ phase: "disconnected", origin: stored.origin }));
+        yield* writes.withPermits(1)(
+          Effect.suspend(() => write({ link: { phase: "disconnected", origin: stored.origin } })),
+        );
         return true;
       }),
     );
