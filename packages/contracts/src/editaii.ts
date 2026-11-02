@@ -1,5 +1,7 @@
 import * as Schema from "effect/Schema";
 
+import { ProjectId } from "./baseSchemas.ts";
+
 export const EditaiiMachine = Schema.Struct({
   id: Schema.String,
   nome: Schema.String,
@@ -29,6 +31,8 @@ export const EditaiiConnectionState = Schema.Struct({
   machine: Schema.NullOr(EditaiiMachine),
   problem: Schema.NullOr(EditaiiProblem),
   canReopen: Schema.Boolean,
+  /** The T3 project new Editaii conversations go to; chosen at any time, kept when disconnecting. */
+  projectId: Schema.NullOr(ProjectId),
 });
 export type EditaiiConnectionState = typeof EditaiiConnectionState.Type;
 

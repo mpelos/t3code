@@ -35,6 +35,7 @@ import { forkParked } from "../serverActivation.ts";
 import * as Protocol from "./EditaiiProtocol.ts";
 import {
   EditaiiConnectionState,
+  ProjectId,
   EditaiiMachine,
   EditaiiProblem,
   EditaiiRequestError,
@@ -63,13 +64,8 @@ const Origin = Schema.String.check(
     }
   }),
 );
-const Common = {
-  version: Schema.Literal(1),
-  origin: Schema.NullOr(Origin),
-  environmentId: Schema.String,
-};
-// Only a disconnected record may lack an origin: pairing starts from a configured one.
-const Linked = { ...Common, origin: Origin };
+// Only a disconnected link may lack an origin: pairing starts from a configured one.
+const Linked = { origin: Origin };
 const PairingFields = {
   attempt: Schema.String,
   state: Schema.String,
@@ -80,8 +76,8 @@ const PairingFields = {
   expiresAt: Schema.Number,
 };
 const AccessToken = { client_id: Schema.String, client_secret: Schema.String };
-const RecordSchema = Schema.Union([
-  Schema.Struct({ ...Common, phase: Schema.Literal("disconnected") }),
+const Phases = [
+  Schema.Struct({ origin: Schema.NullOr(Origin), phase: Schema.Literal("disconnected") }),
   Schema.Struct({ ...Linked, ...PairingFields, phase: Schema.Literal("pairing") }),
   Schema.Struct({
     ...Linked,
@@ -97,12 +93,32 @@ const RecordSchema = Schema.Union([
     machine: EditaiiMachine,
     phase: Schema.Literal("connected"),
   }),
-]);
-type Stored = typeof RecordSchema.Type;
+] as const;
+const LinkSchema = Schema.Union(Phases);
+/** The link with the Editaii, in the phase it is in. */
+type Stored = typeof LinkSchema.Type;
 type Pairing = Extract<Stored, { phase: "pairing" }>;
 type Redeeming = Extract<Stored, { phase: "redeeming" }>;
 type Connected = Extract<Stored, { phase: "connected" }>;
-const RecordJson = Schema.fromJsonString(RecordSchema);
+/**
+ * Version 2 keeps what the person chose apart from the link's phase, so pairing, redeeming and
+ * disconnecting never touch it. Version 1 had only the link, with these two fields in it.
+ */
+const RecordV2 = Schema.Struct({
+  version: Schema.Literal(2),
+  environmentId: Schema.String,
+  /** The T3 project new Editaii conversations go to. */
+  projectId: Schema.NullOr(ProjectId),
+  link: LinkSchema,
+});
+const V1 = { version: Schema.Literal(1), environmentId: Schema.String };
+const RecordV1 = Schema.Union([
+  Schema.Struct({ ...Phases[0].fields, ...V1 }),
+  Schema.Struct({ ...Phases[1].fields, ...V1 }),
+  Schema.Struct({ ...Phases[2].fields, ...V1 }),
+  Schema.Struct({ ...Phases[3].fields, ...V1 }),
+]);
+const RecordJson = Schema.fromJsonString(Schema.Union([RecordV2, RecordV1]));
 const SECRET_NAME = "editaii-connection";
 const PAIRING_LIFETIME = 10 * 60 * 1000;
 const MAX_CALLBACK_BYTES = 8192;
@@ -167,6 +183,13 @@ export class EditaiiConnection extends Context.Service<
     }) => Effect.Effect<void, EditaiiConnectionError>;
     readonly reopenBrowser: () => Effect.Effect<void, EditaiiConnectionError>;
     /**
+     * Chooses the T3 project new Editaii conversations go to, in any phase; null clears it.
+     * Conversations that already have a thread stay where they are.
+     */
+    readonly chooseProject: (
+      projectId: ProjectId | null,
+    ) => Effect.Effect<void, EditaiiConnectionError>;
+    /**
      * Disconnects if the link is the expected one: null while no machine is connected (it cancels
      * a pairing), the connected link otherwise. Any other link is left as it is, and the result
      * is false: a late request to abandon one link never disconnects the next.
@@ -200,7 +223,8 @@ const make = Effect.gen(function* () {
   const ready = yield* Deferred.make<void>();
   const commands = yield* Semaphore.make(1);
   const writes = yield* Semaphore.make(1);
-  let stored: Stored = { version: 1, phase: "disconnected", origin: null, environmentId };
+  let stored: Stored = { phase: "disconnected", origin: null };
+  let projectId: ProjectId | null = null;
   let readFailure: EditaiiConnectionError | undefined;
   let session: { readonly scope: Scope.Closeable; readonly attempt: string } | undefined;
   // The connected period. Cleared before its scope closes, so a scope read from here is open.
@@ -215,6 +239,7 @@ const make = Effect.gen(function* () {
     machine: null,
     problem: null,
     canReopen: false,
+    projectId: null,
   });
 
   const publish = Effect.fn("EditaiiConnection.publish")(function* (
@@ -229,21 +254,32 @@ const make = Effect.gen(function* () {
         stored.phase === "pairing" &&
         session !== undefined &&
         stored.expiresAt > (yield* clock.currentTimeMillis),
+      projectId,
     };
     return yield* SubscriptionRef.set(view, next);
   });
-  // A replacement may already be durable when cancellation arrives; always finish its projection.
-  const save = Effect.fn("EditaiiConnection.save")(function* (next: Stored) {
-    const json = yield* encodeRecord(next).pipe(
-      Effect.mapError((cause) => new EditaiiConnectionError({ reason: "storage", cause })),
-    );
+  // Writes the whole record with one part replaced; callers hold `writes`, so a part written by
+  // one transition is never undone by another. A replacement may already be durable when
+  // cancellation arrives; always finish its projection.
+  const write = Effect.fn("EditaiiConnection.write")(function* (
+    next: Stored,
+    nextProject: ProjectId | null,
+  ) {
+    const json = yield* encodeRecord({
+      version: 2,
+      environmentId,
+      projectId: nextProject,
+      link: next,
+    }).pipe(Effect.mapError((cause) => new EditaiiConnectionError({ reason: "storage", cause })));
     yield* secrets.set(SECRET_NAME, new TextEncoder().encode(json)).pipe(
       Effect.mapError((cause) => new EditaiiConnectionError({ reason: "storage", cause })),
       Effect.tapError(() => publish("storage")),
     );
     stored = next;
+    projectId = nextProject;
     yield* publish();
   }, Effect.uninterruptible);
+  const save = (next: Stored) => write(next, projectId);
   const assertReadable = Effect.fn("EditaiiConnection.assertReadable")(function* () {
     if (readFailure) return yield* readFailure;
   });
@@ -413,10 +449,8 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         if (session?.attempt !== record.attempt) return;
         const connected: Connected = {
-          version: 1,
           phase: "connected",
           origin: record.origin,
-          environmentId,
           client_id: record.client_id,
           client_secret: record.client_secret,
           credential: record.credential,
@@ -588,12 +622,20 @@ const make = Effect.gen(function* () {
     const raw = yield* secrets
       .get(SECRET_NAME)
       .pipe(Effect.mapError((cause) => new EditaiiConnectionError({ reason: "storage", cause })));
-    if (Option.isSome(raw))
-      stored = yield* decodeRecord(new TextDecoder().decode(raw.value)).pipe(
+    if (Option.isSome(raw)) {
+      const record = yield* decodeRecord(new TextDecoder().decode(raw.value)).pipe(
         Effect.mapError((cause) => new EditaiiConnectionError({ reason: "storage", cause })),
       );
-    if (stored.environmentId !== environmentId)
-      return yield* new EditaiiConnectionError({ reason: "configuration" });
+      if (record.environmentId !== environmentId)
+        return yield* new EditaiiConnectionError({ reason: "configuration" });
+      if (record.version === 2) {
+        stored = record.link;
+        projectId = record.projectId;
+      } else {
+        const { version: _version, environmentId: _environmentId, ...link } = record;
+        stored = link;
+      }
+    }
     if (stored.phase === "pairing") {
       yield* publish("interrupted");
       return;
@@ -644,7 +686,7 @@ const make = Effect.gen(function* () {
       parsed.hash
     )
       return yield* new EditaiiConnectionError({ reason: "configuration" });
-    yield* save({ version: 1, phase: "disconnected", origin: parsed.origin, environmentId });
+    yield* writes.withPermits(1)(save({ phase: "disconnected", origin: parsed.origin }));
   }, commands.withPermits(1));
 
   const startPairing = Effect.fn("EditaiiConnection.startPairing")(function* ({
@@ -671,10 +713,8 @@ const make = Effect.gen(function* () {
           // cancellation while binding would leave it listening with no owner: bind uninterrupted.
           const port = yield* listener(attempt, listenerScope).pipe(Effect.uninterruptible);
           const record: Pairing = {
-            version: 1,
             phase: "pairing",
             origin,
-            environmentId,
             attempt,
             state: NodeCrypto.randomBytes(32).toString("base64url"),
             verifier: NodeCrypto.randomBytes(32).toString("base64url"),
@@ -742,6 +782,14 @@ const make = Effect.gen(function* () {
     yield* publish();
   }, commands.withPermits(1));
 
+  const chooseProject = Effect.fn("EditaiiConnection.chooseProject")(function* (
+    next: ProjectId | null,
+  ) {
+    yield* Deferred.await(ready);
+    yield* assertReadable();
+    yield* writes.withPermits(1)(write(stored, next));
+  });
+
   const disconnect = Effect.fn("EditaiiConnection.disconnect")(function* (
     expected: EditaiiVinculo | null,
   ) {
@@ -765,9 +813,7 @@ const make = Effect.gen(function* () {
         if (previous === false) return false;
         if (previous.released) yield* Scope.close(previous.released.scope, Exit.void);
         yield* closeSession;
-        yield* writes.withPermits(1)(
-          save({ version: 1, phase: "disconnected", origin: stored.origin, environmentId }),
-        );
+        yield* writes.withPermits(1)(save({ phase: "disconnected", origin: stored.origin }));
         return true;
       }),
     );
@@ -800,6 +846,7 @@ const make = Effect.gen(function* () {
     configure,
     startPairing,
     reopenBrowser,
+    chooseProject,
     disconnect,
   });
 });

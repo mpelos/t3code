@@ -2,9 +2,9 @@
 import * as NodeHttp from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { expect, it } from "@effect/vitest";
+import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Clock from "effect/Clock";
@@ -36,15 +36,21 @@ import type { EditaiiConnectionState } from "@t3tools/contracts";
 const ORIGIN = "https://editaii.example";
 const ENVIRONMENT = EnvironmentId.make("test-editaii-environment");
 const decodeBody = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
-const decodePairing = Schema.decodeEffect(
+const decodePairingRecord = Schema.decodeEffect(
   Schema.fromJsonString(
     Schema.Struct({
-      phase: Schema.Literal("pairing"),
-      origin: Schema.String,
-      port: Schema.Number,
+      version: Schema.Literal(2),
+      link: Schema.Struct({
+        phase: Schema.Literal("pairing"),
+        origin: Schema.String,
+        port: Schema.Number,
+      }),
     }),
   ),
 );
+/** The link of a saved record in the pairing phase. */
+const decodePairing = (json: string) =>
+  decodePairingRecord(json).pipe(Effect.map((record) => record.link));
 const decodeRedemption = Schema.decodeUnknownEffect(
   Schema.Struct({
     codigo: Schema.String,
@@ -312,8 +318,8 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       yield* Fiber.join(cancellation);
       expect(Exit.hasInterrupts(yield* Fiber.await(configuring))).toBe(true);
       expect(yield* decodeBody(new TextDecoder().decode(h.saved()))).toMatchObject({
-        phase: "disconnected",
-        origin: ORIGIN,
+        version: 2,
+        link: { phase: "disconnected", origin: ORIGIN },
       });
       expect(yield* h.connection.state).toMatchObject({ status: "disconnected", origin: ORIGIN });
     }),
@@ -673,6 +679,102 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       }),
   );
 
+  describe("the project for new conversations", () => {
+    const PROJECT = ProjectId.make("projeto-editaii");
+    const savedRecord = (h: { readonly saved: () => Uint8Array | undefined }) =>
+      decodeBody(new TextDecoder().decode(h.saved()));
+
+    it.effect("a version 1 record keeps its link, and is written back as version 2", () =>
+      Effect.gen(function* () {
+        const h = yield* harness({ initial: CONNECTED });
+        expect(yield* h.connection.state).toMatchObject({ status: "connected", projectId: null });
+        yield* h.connection.chooseProject(PROJECT);
+        expect(yield* h.connection.state).toMatchObject({
+          status: "connected",
+          projectId: PROJECT,
+        });
+        expect(yield* savedRecord(h)).toEqual({
+          version: 2,
+          environmentId: ENVIRONMENT,
+          projectId: PROJECT,
+          link: {
+            phase: "connected",
+            origin: ORIGIN,
+            client_id: "machines.access",
+            client_secret: "test-secret",
+            credential: "machine-credential",
+            machine: MACHINE,
+          },
+        });
+        const restarted = yield* h.restart();
+        expect(yield* restarted.connection.state).toMatchObject({
+          status: "connected",
+          projectId: PROJECT,
+        });
+      }),
+    );
+
+    it.effect("one chosen while a pairing completes is kept by it", () =>
+      Effect.gen(function* () {
+        const activating = yield* Deferred.make<void>();
+        const activate = yield* Deferred.make<void>();
+        const h = yield* harness({
+          reply: (request) =>
+            request.url.endsWith("/ativar")
+              ? Deferred.succeed(activating, undefined).pipe(
+                  Effect.andThen(Deferred.await(activate)),
+                  Effect.as(Response.json(MACHINE)),
+                )
+              : Effect.succeed(Response.json({ ...MACHINE, ativada_em: null })),
+        });
+        const url = yield* h.begin();
+        yield* callback(url);
+        yield* Deferred.await(activating);
+        yield* h.connection.chooseProject(PROJECT);
+        yield* Deferred.succeed(activate, undefined);
+        yield* waitFor(h.connection, (state) => state.status === "connected");
+        expect((yield* h.connection.state).projectId).toBe(PROJECT);
+        expect(yield* savedRecord(h)).toMatchObject({
+          projectId: PROJECT,
+          link: { phase: "connected" },
+        });
+      }),
+    );
+
+    it.effect("disconnecting keeps the origin and the project, and drops the credentials", () =>
+      Effect.gen(function* () {
+        const h = yield* harness({ initial: CONNECTED });
+        yield* h.connection.chooseProject(PROJECT);
+        const state = yield* h.connection.state;
+        expect(yield* h.connection.disconnect(EditaiiConnection.vinculoDo(state))).toBe(true);
+        expect(yield* savedRecord(h)).toEqual({
+          version: 2,
+          environmentId: ENVIRONMENT,
+          projectId: PROJECT,
+          link: { phase: "disconnected", origin: ORIGIN },
+        });
+      }),
+    );
+
+    it.effect("a record from a newer T3 is an error, never an empty connection", () =>
+      Effect.gen(function* () {
+        const futuro = new TextEncoder().encode(
+          JSON.stringify({
+            version: 3,
+            environmentId: ENVIRONMENT,
+            projectId: null,
+            link: { phase: "disconnected", origin: ORIGIN },
+          }),
+        );
+        const h = yield* harness({ initial: futuro });
+        expect((yield* h.connection.state).problem).toBe("storage");
+        const recusada = yield* Effect.flip(h.connection.chooseProject(PROJECT));
+        expect(recusada.reason).toBe("storage");
+        expect(h.saved()).toEqual(futuro);
+      }),
+    );
+  });
+
   it.effect("disconnect waits for in-flight redemption to end and cannot be undone by it", () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
@@ -739,7 +841,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       yield* Fiber.interrupt(disconnecting);
       expect(yield* h.connection.state).toMatchObject({ status: "disconnected", canReopen: false });
       expect(yield* decodeBody(new TextDecoder().decode(h.saved()))).toMatchObject({
-        phase: "disconnected",
+        link: { phase: "disconnected" },
       });
       expect((yield* callback(url).pipe(Effect.result))._tag).toBe("Failure");
     }),
