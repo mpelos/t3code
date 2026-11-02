@@ -15,14 +15,13 @@ import { AsyncResult } from "effect/reactivity";
 import { useState } from "react";
 
 import { useEnvironmentSettings } from "../../hooks/useSettings";
-import { getCustomModelOptionsByInstance } from "../../modelSelection";
+import { getCustomModelOptionsByInstance, resolveModelDisplayName } from "../../modelSelection";
 import { providerInstanceEntriesFor } from "../../providerInstances";
 import { editaiiEnvironment } from "../../state/editaii";
 import { useProjects } from "../../state/entities";
 import { useEnvironmentProviders } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { resolveContextWindowModelDisplayName } from "../chat/ContextWindowMeter.logic";
 import { runtimeModeConfig } from "../chat/runtimeModeConfig";
 import {
   AlertDialog,
@@ -426,7 +425,7 @@ function ReadyConfiguration({
       (entry) => entry.instanceId === instanceId,
     )?.displayName ?? instanceId;
   const modelName =
-    resolveContextWindowModelDisplayName(
+    resolveModelDisplayName(
       configuration.modelSelection,
       getCustomModelOptionsByInstance(settings, providers, instanceId, model),
     ) ?? model;

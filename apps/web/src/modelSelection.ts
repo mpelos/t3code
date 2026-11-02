@@ -24,7 +24,7 @@ import {
   getProviderModels,
   resolveSelectableProvider,
 } from "./providerModels";
-import { ModelEsque } from "./components/chat/providerIconUtils";
+import { getDisplayModelName, ModelEsque } from "./components/chat/providerIconUtils";
 import {
   type ProviderInstanceEntry,
   deriveProviderInstanceEntries,
@@ -384,4 +384,20 @@ export function resolveAppModelSelectionState(
   }
 
   return NO_PROVIDER_MODEL_SELECTION;
+}
+
+/** The name to show for `selection`: its model as listed for that exact instance, else its slug. */
+export function resolveModelDisplayName(
+  selection: ModelSelection | null | undefined,
+  modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelEsque>>,
+): string | null {
+  if (!selection) {
+    return null;
+  }
+
+  const selectedModel = modelOptionsByInstance
+    .get(selection.instanceId)
+    ?.find((model) => model.slug === selection.model);
+
+  return selectedModel ? getDisplayModelName(selectedModel) : selection.model;
 }

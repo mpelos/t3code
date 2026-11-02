@@ -16,6 +16,7 @@ import {
   resolveAppModelSelectionForInstance,
   resolveAppModelSelectionState,
   resolveEffectiveDefaultModelSelection,
+  resolveModelDisplayName,
 } from "./modelSelection";
 
 function provider(input: {
@@ -779,4 +780,28 @@ describe("default model settings and new-thread composer parity", () => {
       expect(composerTraits.promptEffort).toBe(effort);
     },
   );
+});
+
+describe("resolveModelDisplayName", () => {
+  it("uses the selected model from the exact provider instance", () => {
+    const primaryInstanceId = ProviderInstanceId.make("codex");
+    const selectedInstanceId = ProviderInstanceId.make("codex-work");
+    const modelOptionsByInstance = new Map([
+      [
+        primaryInstanceId,
+        [{ slug: "gpt-5.6-sol", name: "Primary profile model", shortName: "Primary" }],
+      ],
+      [selectedInstanceId, [{ slug: "gpt-5.6-sol", name: "GPT-5.6 Sol", shortName: "5.6 Sol" }]],
+    ]);
+
+    expect(
+      resolveModelDisplayName(
+        {
+          instanceId: selectedInstanceId,
+          model: "gpt-5.6-sol",
+        },
+        modelOptionsByInstance,
+      ),
+    ).toBe("GPT-5.6 Sol");
+  });
 });
