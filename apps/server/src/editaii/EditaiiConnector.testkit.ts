@@ -373,7 +373,7 @@ const PAUSA = Duration.seconds(5);
  * for the next change, and the clock moves only when a test moves it.
  */
 export const make = Effect.fn("EditaiiMaquina.make")(function* (
-  configuracao: Journal.Configuracao,
+  configuracao: Effect.Effect<Journal.Configuracao, Journal.EditaiiConfiguracaoIlegivel>,
 ) {
   const base = yield* Effect.acquireRelease(
     Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-editaii-connector-"))),
@@ -495,7 +495,7 @@ export const make = Effect.fn("EditaiiMaquina.make")(function* (
   ) {
     const scope = yield* Scope.make();
     yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
-    const servidor = Connector.layer(Effect.succeed(configuracao)).pipe(
+    const servidor = Connector.layer(configuracao).pipe(
       Layer.provideMerge(Layer.mergeAll(Connection.layer, journal)),
       Layer.provideMerge(Layer.merge(deps, t3)),
     );

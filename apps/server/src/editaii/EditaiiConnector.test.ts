@@ -188,8 +188,10 @@ const resposta =
 const SIM: Protocol.Respostas = { p1: { texto: "Sim" } };
 
 /** A machine whose fake T3 lives as long as the test, so a restart keeps its runs. */
-const maquina = Effect.gen(function* () {
-  const m = yield* Maquinas.make(pronta);
+const maquinaCom = Effect.fn("test.maquinaCom")(function* (
+  configuracao: Effect.Effect<Journal.Configuracao, Journal.EditaiiConfiguracaoIlegivel>,
+) {
+  const m = yield* Maquinas.make(configuracao);
   const t3 = fakeT3(m.mudou);
   return {
     ...m,
@@ -200,6 +202,7 @@ const maquina = Effect.gen(function* () {
     perder: t3.perder,
   };
 });
+const maquina = maquinaCom(Effect.succeed(pronta));
 type Maquina = Effect.Success<typeof maquina>;
 
 /** Request 1 accepted, confirmed and asking question `x`, which the person sees. */
@@ -263,6 +266,26 @@ describe("EditaiiConnector", () => {
       yield* Deferred.succeed(trava, undefined);
       yield* m.quando(() => m.worker.estado(1) === "aguardando_pessoa");
       assert.deepEqual(tipos(m.worker.aplicados), ["trabalho-1:1:intervencao"]);
+      assert.deepEqual(m.worker.invalidos, []);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("settings that cannot be read hold the request until they can, then it runs", () =>
+    Effect.gen(function* () {
+      let ilegiveis = 1;
+      const m = yield* maquinaCom(
+        Effect.suspend(() =>
+          ilegiveis-- > 0
+            ? Effect.fail(new Journal.EditaiiConfiguracaoIlegivel({ cause: "settings unreadable" }))
+            : Effect.succeed(pronta),
+        ),
+      );
+      m.worker.pedir(1);
+      yield* m.ligar;
+      yield* m.pausa;
+      yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+      assert.equal(m.t3.chamadasAccept, 1);
+      assert.deepEqual(tipos(m.worker.aplicados), []);
       assert.deepEqual(m.worker.invalidos, []);
     }).pipe(Effect.scoped),
   );

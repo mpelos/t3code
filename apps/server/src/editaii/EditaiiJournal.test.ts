@@ -126,17 +126,22 @@ describe("EditaiiJournal format", () => {
 
 const V1 = { origem: "https://editaii.example", maquina: "maquina-1", ambiente: "ambiente-1" };
 const V2 = { ...V1, maquina: "maquina-2" };
-const pronta: EditaiiJournal.Configuracao = {
+const pronta = Effect.succeed<EditaiiJournal.Configuracao>({
   type: "pronta",
   projectId: ProjectId.make("projeto"),
   modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "modelo" },
   runtimeMode: "full-access",
   interactionMode: "default",
-};
-const indisponivel: EditaiiJournal.Configuracao = {
+});
+const MOTIVO = "Escolha um projeto do T3 para o Editaii.";
+const indisponivel = Effect.succeed<EditaiiJournal.Configuracao>({
   type: "indisponivel",
-  motivo: "Escolha um projeto do T3 para o Editaii.",
-};
+  motivo: MOTIVO,
+});
+/** Settings that cannot be read at all. */
+const ilegivel = Effect.fail(
+  new EditaiiJournal.EditaiiConfiguracaoIlegivel({ cause: new Error("settings unreadable") }),
+);
 
 const pedido = (
   n: number,
@@ -270,6 +275,23 @@ const tipos = (eventos: ReadonlyArray<Protocol.Evento>) =>
   eventos.map((e) => `${e.trabalho_id}:${e.sequencia}:${e.tipo}`);
 
 describe("EditaiiJournal deliveries", () => {
+  it.effect(
+    "settings that cannot be read record nothing: the request is received again later",
+    () =>
+      Effect.gen(function* () {
+        const a = yield* ambiente;
+        yield* usar(a, (j) =>
+          Effect.gen(function* () {
+            const falhou = yield* Effect.flip(j.receber(V1, pedido(1), ilegivel));
+            assert.strictEqual(falhou._tag, "EditaiiConfiguracaoIlegivel");
+            assert.deepEqual(tipos(yield* enviar(j)), []);
+            const passo = yield* j.receber(V1, pedido(1), pronta);
+            assert.strictEqual(passo.type, "executar");
+          }),
+        );
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("a request is frozen and marked invoked once; only its receipt starts the job", () =>
     Effect.gen(function* () {
       const a = yield* ambiente;
@@ -308,9 +330,10 @@ describe("EditaiiJournal deliveries", () => {
             cursor: null,
           });
           assert.isNull(yield* j.confirmada(V1, "entrega-1", "ok"));
-          // The conversation's next request continues its thread, with the thread's own settings.
+          // The conversation's next request continues its thread, with the thread's own settings:
+          // the settings for new threads are not even read.
           const seguinte = planoDoPedido(
-            yield* j.receber(V1, pedido(2, { thread_t3: plano.threadId }), indisponivel),
+            yield* j.receber(V1, pedido(2, { thread_t3: plano.threadId }), ilegivel),
           );
           assert.strictEqual(seguinte.threadId, plano.threadId);
           assert.isNull(seguinte.newThread);
@@ -408,7 +431,7 @@ describe("EditaiiJournal deliveries", () => {
               trabalho_id: "trabalho-5",
               sequencia: 1,
               tipo: "falha",
-              motivo: indisponivel.type === "indisponivel" ? indisponivel.motivo : "",
+              motivo: MOTIVO,
             });
             // An outcome of the other kind, or another outcome later, is refused.
             assert.include(

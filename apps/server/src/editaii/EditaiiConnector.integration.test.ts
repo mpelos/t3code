@@ -25,13 +25,13 @@ import * as Receipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as Worker from "../orchestration-v2/EffectWorker.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 
-const configuracao: Journal.Configuracao = {
+const configuracao = Effect.succeed<Journal.Configuracao>({
   type: "pronta",
   projectId: T3.projectId,
   modelSelection: T3.modelSelection,
   runtimeMode: "full-access",
   interactionMode: "default",
-};
+});
 
 /** Runs `efeito` in the T3 a start built. */
 const noT3 =

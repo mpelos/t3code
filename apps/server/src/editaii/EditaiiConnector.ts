@@ -51,11 +51,12 @@ const desfechoDaResposta = (resultado: Adapter.AnswerResult): Journal.Desfecho =
 };
 
 /**
- * `configuracao` says how a new conversation's thread runs, read when each request arrives.
+ * `configuracao` says how a new conversation's thread runs, read when a request starts one.
  */
-const make = Effect.fn("EditaiiConnector.make")(function* (
-  configuracao: Effect.Effect<Journal.Configuracao>,
+const make = Effect.fn("EditaiiConnector.make")(function* <R>(
+  configuracao: Effect.Effect<Journal.Configuracao, Journal.EditaiiConfiguracaoIlegivel, R>,
 ) {
+  const lerConfiguracao = Effect.provide(configuracao, yield* Effect.context<R>());
   const connection = yield* Connection.EditaiiConnection;
   const journal = yield* Journal.EditaiiJournal;
   const adapter = yield* Adapter.EditaiiT3Adapter;
@@ -176,7 +177,18 @@ const make = Effect.fn("EditaiiConnector.make")(function* (
      * events it owes reach it.
      */
     const conduzir = Effect.fn("EditaiiConnector.drive")(function* (entrega: Protocol.Entrega) {
-      const receber = Effect.flatMap(configuracao, (c) => journal.receber(v, entrega, c));
+      // Settings that cannot be read leave the delivery unrecorded; it is received again.
+      const receber: Effect.Effect<Journal.Passo, Journal.EditaiiJournalError> = journal
+        .receber(v, entrega, lerConfiguracao)
+        .pipe(
+          Effect.catchTags({
+            EditaiiConfiguracaoIlegivel: (erro) =>
+              Effect.logWarning("Editaii could not read the T3 settings; retrying", erro).pipe(
+                Effect.andThen(Effect.sleep(PAUSA)),
+                Effect.andThen(Effect.suspend(() => receber)),
+              ),
+          }),
+        );
       let passo = yield* receber;
       for (;;) {
         switch (passo.type) {
@@ -289,5 +301,6 @@ const make = Effect.fn("EditaiiConnector.make")(function* (
   return EditaiiConnector.of({ desligar });
 });
 
-export const layer = (configuracao: Effect.Effect<Journal.Configuracao>) =>
-  Layer.effect(EditaiiConnector, make(configuracao));
+export const layer = <R>(
+  configuracao: Effect.Effect<Journal.Configuracao, Journal.EditaiiConfiguracaoIlegivel, R>,
+) => Layer.effect(EditaiiConnector, make(configuracao));

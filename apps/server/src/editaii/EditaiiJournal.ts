@@ -53,6 +53,15 @@ export class EditaiiJournalError extends Schema.TaggedError<EditaiiJournalError>
   }
 }
 
+/**
+ * The T3 settings could not be read, which says nothing about what they are: the delivery stays
+ * as it was, and is received again once they can be read.
+ */
+export class EditaiiConfiguracaoIlegivel extends Schema.TaggedError<EditaiiConfiguracaoIlegivel>()(
+  "EditaiiConfiguracaoIlegivel",
+  { cause: Schema.Defect() },
+) {}
+
 /** How a new conversation's T3 thread runs, read from the T3 settings when a request arrives. */
 export type Configuracao =
   | {
@@ -124,13 +133,14 @@ export interface EditaiiJournalShape {
   /**
    * Records a delivery the Worker served. A new one is checked against the local conversation and
    * frozen into a plan, already marked as invoked; a repeated one resumes where it stopped. Same
-   * id with another envelope is a conflict.
+   * id with another envelope is a conflict. `configuracao` is read only for a request that starts
+   * a thread; if it cannot be read, nothing is recorded.
    */
   readonly receber: (
     vinculo: EditaiiVinculo,
     entrega: Protocol.Entrega,
-    configuracao: Configuracao,
-  ) => Effect.Effect<Passo, EditaiiJournalError>;
+    configuracao: Effect.Effect<Configuracao, EditaiiConfiguracaoIlegivel>,
+  ) => Effect.Effect<Passo, EditaiiJournalError | EditaiiConfiguracaoIlegivel>;
   /** Records what the T3 did with an invoked delivery, with its effects on the job and its events. */
   readonly resolver: (
     vinculo: EditaiiVinculo,
@@ -279,6 +289,7 @@ const invalid = (detail: string) => (cause: unknown) =>
   new EditaiiJournalError({ reason: "invalid_data", detail, cause });
 const conflict = (detail: string) => new EditaiiJournalError({ reason: "conflict", detail });
 const isJournalError = Schema.is(EditaiiJournalError);
+const isConfiguracaoIlegivel = Schema.is(EditaiiConfiguracaoIlegivel);
 
 const open = Effect.fn("EditaiiJournal.open")(function* (filename: string) {
   const context = yield* Layer.build(NodeSqliteClient.layer({ filename })).pipe(
@@ -438,7 +449,9 @@ const make = Effect.gen(function* () {
   const transacao = <A, E>(nome: string, efeito: Effect.Effect<A, E>) =>
     efeito.pipe(
       sql.withTransaction,
-      Effect.mapError((e) => (isJournalError(e) ? e : storage(nome)(e))),
+      Effect.mapError((e) =>
+        isJournalError(e) || isConfiguracaoIlegivel(e) ? e : storage(nome)(e),
+      ),
     );
   const agora = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -704,7 +717,7 @@ const make = Effect.gen(function* () {
     k: string,
     e: Protocol.EntregaPedido,
     envelope: string,
-    configuracao: Configuracao,
+    configuracao: Effect.Effect<Configuracao, EditaiiConfiguracaoIlegivel>,
   ) {
     const conversa = yield* conversaDe(k, e.conversa.id);
     if (conversa === undefined) {
@@ -745,25 +758,27 @@ const make = Effect.gen(function* () {
     if (associada !== null) {
       // Later requests run with the thread's current settings, which the person may change in the T3.
       plano = { ...base, threadId: ThreadId.make(associada), newThread: null };
-    } else if (configuracao.type === "pronta") {
+    } else {
+      const c = yield* configuracao;
+      if (c.type === "indisponivel") {
+        const t = yield* registrar(null, { versao: 1, tipo: "nao_executada", evento: "falha" });
+        yield* emitir(k, t.trabalho_id, { tipo: "falha", motivo: c.motivo });
+        yield* encerrar(k, t.trabalho_id, "falhou");
+        return { type: "aguardar" } satisfies Passo;
+      }
       plano = {
         ...base,
         threadId: ThreadId.make(
           conversa?.thread_reservada ?? threadReservada(k, e.conversa.id, e.conversa.geracao),
         ),
         newThread: {
-          projectId: configuracao.projectId,
+          projectId: c.projectId,
           title: `Editaii: edital ${e.edital.id}`,
-          modelSelection: configuracao.modelSelection,
-          runtimeMode: configuracao.runtimeMode,
-          interactionMode: configuracao.interactionMode,
+          modelSelection: c.modelSelection,
+          runtimeMode: c.runtimeMode,
+          interactionMode: c.interactionMode,
         },
       };
-    } else {
-      const t = yield* registrar(null, { versao: 1, tipo: "nao_executada", evento: "falha" });
-      yield* emitir(k, t.trabalho_id, { tipo: "falha", motivo: configuracao.motivo });
-      yield* encerrar(k, t.trabalho_id, "falhou");
-      return { type: "aguardar" } satisfies Passo;
     }
     yield* registrar(yield* requestPlanJson.encode(plano), null);
     return {
