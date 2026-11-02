@@ -120,6 +120,8 @@ vi.mock(import("../../state/entities"), async (original) => ({
     { id: ProjectId.make("rascunho"), environmentId, title: "Rascunho", isScratch: true },
     { id: ProjectId.make("outro"), environmentId: EnvironmentId.make("outro"), title: "Outro" },
   ]) as never,
+  useQuietThreadShell: ((ref: { threadId: string } | null) =>
+    ref?.threadId === "thread-1" ? { title: "Edital 12/2026" } : null) as never,
 }));
 vi.mock(import("../../hooks/useSettings"), async (original) => ({
   ...(await original()),
@@ -150,9 +152,11 @@ describe("EditaiiSettings", () => {
 
     const dialog = page.getByRole("alertdialog");
     await expect.element(dialog.getByText("2 updates not yet returned to Editaii")).toBeVisible();
-    await expect.element(dialog.getByText("Blocked: its T3 thread was lost")).toBeVisible();
+    await expect.element(dialog.getByText("Blocked: its T3 thread needs checking")).toBeVisible();
+    // A conversation with no thread yet is named by its id.
+    await expect.element(dialog.getByText("Conversation conversa")).toBeVisible();
     await expect
-      .element(dialog.getByRole("link", { name: "Open thread" }))
+      .element(dialog.getByRole("link", { name: "Edital 12/2026" }))
       .toHaveAttribute("href", "/escritorio/thread-1");
     await expect.element(dialog.getByText(/keep running/)).toBeVisible();
     await expect.element(dialog.getByText(/Revoke it there/)).toBeVisible();

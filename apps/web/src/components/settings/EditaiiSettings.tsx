@@ -9,6 +9,7 @@ import {
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { Link } from "@tanstack/react-router";
 import { AsyncResult } from "effect/reactivity";
@@ -18,7 +19,7 @@ import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { getCustomModelOptionsByInstance, resolveModelDisplayName } from "../../modelSelection";
 import { providerInstanceEntriesFor } from "../../providerInstances";
 import { editaiiEnvironment } from "../../state/editaii";
-import { useProjects } from "../../state/entities";
+import { useProjects, useQuietThreadShell } from "../../state/entities";
 import { useEnvironmentProviders } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -462,8 +463,12 @@ function ActivityList({
         return (
           <li key={job.jobId} className="grid gap-0.5">
             <span className="flex flex-wrap items-baseline gap-x-2">
-              <span className="font-medium">{state}</span>
-              <ThreadLink environmentId={environmentId} threadId={job.threadId} />
+              <Conversation
+                environmentId={environmentId}
+                threadId={job.threadId}
+                conversationId={job.conversationId}
+              />
+              <span className="text-muted-foreground">{state}</span>
             </span>
             {owed.length > 0 && (
               <span className="text-xs text-muted-foreground">{owed.join(" · ")}</span>
@@ -473,29 +478,39 @@ function ActivityList({
       })}
       {activity.blockedConversations.map((conversation) => (
         <li key={conversation.conversationId} className="flex flex-wrap items-baseline gap-x-2">
-          <span className="font-medium">{BLOCKED_REASON[conversation.reason]}</span>
-          <ThreadLink environmentId={environmentId} threadId={conversation.threadId} />
+          <Conversation
+            environmentId={environmentId}
+            threadId={conversation.threadId}
+            conversationId={conversation.conversationId}
+          />
+          <span className="text-muted-foreground">{BLOCKED_REASON[conversation.reason]}</span>
         </li>
       ))}
     </ul>
   );
 }
 
-function ThreadLink({
+/** An Editaii conversation by its T3 thread's title, linked to it; by its id while it has none. */
+function Conversation({
   environmentId,
   threadId,
+  conversationId,
 }: {
   environmentId: EnvironmentId;
   threadId: string | null;
+  conversationId: string;
 }) {
-  if (threadId === null) return <span className="text-xs text-muted-foreground">No thread</span>;
+  const thread = threadId === null ? null : ThreadId.make(threadId);
+  const shell = useQuietThreadShell(thread === null ? null : scopeThreadRef(environmentId, thread));
+  const name = shell?.title ?? `Conversation ${conversationId.slice(0, 8)}`;
+  if (thread === null) return <span className="font-medium">{name}</span>;
   return (
     <Link
       to="/$environmentId/$threadId"
-      params={{ environmentId, threadId: ThreadId.make(threadId) }}
-      className="text-xs underline underline-offset-2"
+      params={{ environmentId, threadId: thread }}
+      className="font-medium underline underline-offset-2"
     >
-      Open thread
+      {name}
     </Link>
   );
 }

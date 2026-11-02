@@ -103,7 +103,7 @@ describe("EditaiiSettings logic", () => {
     ).toEqual({
       state: "Waiting for an answer in Editaii",
       owed: [
-        "Editaii has not been told it started",
+        "Receipt not yet delivered to Editaii",
         "2 updates not yet returned to Editaii",
         "Returns are paused: Editaii refused an update",
       ],

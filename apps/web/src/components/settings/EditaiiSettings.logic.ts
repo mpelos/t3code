@@ -56,7 +56,7 @@ export function configurationProblem(configuration: EditaiiConfiguration): strin
 }
 
 const JOB_STATE: Record<Job["state"], string> = {
-  delivered: "Received, not started yet",
+  delivered: "Received, waiting for Editaii's confirmation",
   running: "Running",
   waiting_for_person: "Waiting for an answer in Editaii",
   action_in_t3: "Needs action in T3",
@@ -68,7 +68,7 @@ const JOB_STATE: Record<Job["state"], string> = {
 /** A job as the person reads it: its state, then what it still owes Editaii. */
 export function describeJob(job: Job): { state: string; owed: ReadonlyArray<string> } {
   const owed: Array<string> = [];
-  if (job.receiptPending) owed.push("Editaii has not been told it started");
+  if (job.receiptPending) owed.push("Receipt not yet delivered to Editaii");
   if (job.pendingEvents > 0)
     owed.push(
       job.pendingEvents === 1
@@ -81,5 +81,5 @@ export function describeJob(job: Job): { state: string; owed: ReadonlyArray<stri
 
 export const BLOCKED_REASON: Record<Blocked["reason"], string> = {
   conflict: "Blocked: Editaii and this computer disagree about this conversation",
-  thread_lost: "Blocked: its T3 thread was lost",
+  thread_lost: "Blocked: its T3 thread needs checking",
 };
