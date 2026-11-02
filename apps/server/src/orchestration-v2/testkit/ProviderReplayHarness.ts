@@ -523,10 +523,8 @@ export function layerWithRegistry<Error>(
     layerCommandOutputHubProvided,
   ).pipe(Layer.provide(ProviderTurnStartServiceTestkit.layer), Layer.provide(NodeServices.layer));
 
-  if (options.runEffectWorker === false) {
-    return layerReplayRuntime;
-  }
-  // Build recovery before runtime so it commits before the effect worker claims work.
+  // Build recovery before runtime so it commits before the effect worker claims work, also when
+  // the test drives the worker itself.
   const layerStartupRecovery: Layer.Layer<
     never,
     MigrationError | PlatformError.PlatformError | SqlError
@@ -548,6 +546,9 @@ export function layerWithRegistry<Error>(
           ),
         )
       : Layer.empty;
+  if (options.runEffectWorker === false) {
+    return layerReplayRuntime.pipe(Layer.provide(layerStartupRecovery));
+  }
   return Layer.effect(
     Orchestrator.OrchestratorV2,
     Effect.gen(function* () {

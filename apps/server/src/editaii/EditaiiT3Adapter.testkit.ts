@@ -19,6 +19,7 @@ import {
   ThreadId,
   TurnItemId,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2UserInputQuestion,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -91,6 +92,8 @@ export const watch = Effect.fn("EditaiiT3Harness.watch")(function* (
 export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
   name: string,
   databasePath?: string,
+  // As a T3 that restarts on the file: reconcile what was live before it serves anything.
+  options: { readonly recoverOnStartup?: boolean } = {},
 ) {
   const cwd = yield* checkpointWorkspace(name);
   const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
@@ -182,6 +185,7 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
   const orchestration = Harness.layerWithRegistry({ name }, Registry.layerSingle(provider), {
     databaseLayer: database,
     runEffectWorker: false,
+    recoverOnStartup: options.recoverOnStartup ?? false,
   });
   const receipts = Receipts.layer.pipe(Layer.provide(database));
   const settings = Settings.layerTest();
@@ -224,27 +228,40 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
   const dependencies = Layer.mergeAll(orchestration, receipts, threads, launch, database);
   const layer = Layer.provideMerge(Adapter.layer, dependencies);
 
-  const start = Effect.fn("EditaiiT3Adapter.testStart")(function* (request: Adapter.RequestPlan) {
-    const adapter = yield* Adapter.EditaiiT3Adapter;
-    const worker = yield* Worker.OrchestrationEffectWorkerV2;
-    const released = yield* watch(
+  /**
+   * Watches for a run to be released to the provider, on `threadId` or any thread. Start watching
+   * before whatever accepts the request, so the release cannot pass unseen.
+   */
+  const release = (threadId?: ThreadId) =>
+    watch(
       (e) =>
         e.type === "run.updated" &&
-        e.threadId === request.threadId &&
+        (threadId === undefined || e.threadId === threadId) &&
         e.payload.status === "starting",
     );
-    const acceptance = yield* adapter.accept(request);
-    yield* Fiber.join(released);
+  /** Has the provider start the next turn the T3 owes it, as an answer by message does. */
+  const nextTurn = Effect.fn("EditaiiT3Adapter.testNextTurn")(function* () {
+    const worker = yield* Worker.OrchestrationEffectWorkerV2;
     const running = yield* watch(
-      (e) =>
-        e.type === "provider-turn.updated" &&
-        e.threadId === request.threadId &&
-        e.payload.status === "running",
+      (e) => e.type === "provider-turn.updated" && e.payload.status === "running",
     );
     yield* worker.drain();
     const turn = yield* Queue.take(started);
     yield* Fiber.join(running);
-    return { acceptance, turn };
+    return turn;
+  });
+  /** Once `released` saw the run released, has the provider start its turn. */
+  const beginTurn = Effect.fn("EditaiiT3Adapter.testBeginTurn")(function* (
+    released: Effect.Success<ReturnType<typeof release>>,
+  ) {
+    yield* Fiber.join(released);
+    return yield* nextTurn();
+  });
+  const start = Effect.fn("EditaiiT3Adapter.testStart")(function* (request: Adapter.RequestPlan) {
+    const adapter = yield* Adapter.EditaiiT3Adapter;
+    const released = yield* release(request.threadId);
+    const acceptance = yield* adapter.accept(request);
+    return { acceptance, turn: yield* beginTurn(released) };
   });
   const finish = Effect.fn("EditaiiT3Adapter.testFinish")(function* (
     turn: ProviderAdapter.ProviderAdapterV2TurnInput,
@@ -327,6 +344,9 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
     turn: ProviderAdapter.ProviderAdapterV2TurnInput,
     kind: "question" | "approval" | "not_resumable" | "message",
     name: string = kind,
+    questions: ReadonlyArray<OrchestrationV2UserInputQuestion> = ["constructor", "__proto__"].map(
+      (key) => ({ id: key, header: key, question: key, options: [], allowCustomAnswer: true }),
+    ),
   ) {
     const engine = yield* Orchestrator.OrchestratorV2;
     const providerTurn = (yield* engine.getThreadProjection(turn.threadId)).providerTurns.find(
@@ -415,13 +435,7 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
           : {
               ...base,
               type: "user_input_request",
-              questions: ["constructor", "__proto__"].map((key) => ({
-                id: key,
-                header: key,
-                question: key,
-                options: [],
-                allowCustomAnswer: true,
-              })),
+              questions,
             },
     });
     yield* Fiber.join(persisted);
@@ -474,6 +488,9 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
     events,
     started,
     responses,
+    release,
+    beginTurn,
+    nextTurn,
     start,
     finish,
     question,
