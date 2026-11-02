@@ -45,8 +45,8 @@ function EnvironmentConnection({
   label: string;
 }) {
   const result = useAtomValue(editaiiEnvironment.state({ environmentId, input: {} }));
-  const state = AsyncResult.getOrElse(result, () => null);
-  if (!state)
+  const panel = AsyncResult.getOrElse(result, () => null);
+  if (!panel)
     return (
       <p className="px-4 py-3 text-sm text-muted-foreground">
         {AsyncResult.isFailure(result)
@@ -55,7 +55,12 @@ function EnvironmentConnection({
       </p>
     );
   return (
-    <ConnectionForm key={state.origin} environmentId={environmentId} label={label} state={state} />
+    <ConnectionForm
+      key={panel.connection.origin}
+      environmentId={environmentId}
+      label={label}
+      state={panel.connection}
+    />
   );
 }
 
@@ -79,8 +84,20 @@ function ConnectionForm({
   const disconnect = useAtomCommand(editaiiEnvironment.disconnect, { reportFailure: false });
   const disabled = pending || !allowed;
   const disconnected = state.status === "disconnected";
+  // What the person sees is what ends: this link, or this pairing attempt.
+  const target =
+    state.origin !== null && state.machine !== null
+      ? ({
+          type: "link",
+          origin: state.origin,
+          machineId: state.machine.id,
+          environmentId: state.machine.ambiente_t3,
+        } as const)
+      : state.attempt !== null
+        ? ({ type: "attempt", attempt: state.attempt } as const)
+        : null;
 
-  async function run(operation: "configure" | "start" | "reopen" | "disconnect") {
+  async function run(operation: "configure" | "start" | "reopen") {
     setPending(true);
     setError(null);
     const result =
@@ -88,15 +105,26 @@ function ConnectionForm({
         ? await configure({ environmentId, input: { origin } })
         : operation === "start"
           ? await start({ environmentId, input: { machineName } })
-          : operation === "reopen"
-            ? await reopen({ environmentId, input: {} })
-            : await disconnect({ environmentId, input: {} });
+          : await reopen({ environmentId, input: {} });
     setPending(false);
     if (result._tag === "Failure") {
       const failure = squashAtomCommandFailure(result);
       setError(
         failure instanceof Error ? failure.message : "Could not update the Editaii connection.",
       );
+    }
+  }
+
+  async function end(shown: NonNullable<typeof target>) {
+    setPending(true);
+    setError(null);
+    const result = await disconnect({ environmentId, input: { target: shown } });
+    setPending(false);
+    if (result._tag === "Failure") {
+      const failure = squashAtomCommandFailure(result);
+      setError(failure instanceof Error ? failure.message : "Could not disconnect from Editaii.");
+    } else if (result.value === "not_current") {
+      setError("The connection changed since it was shown. Review it and try again.");
     }
   }
 
@@ -209,8 +237,8 @@ function ConnectionForm({
             Open browser again
           </Button>
         )}
-        {!disconnected && (
-          <Button variant="outline" disabled={disabled} onClick={() => void run("disconnect")}>
+        {target !== null && (
+          <Button variant="outline" disabled={disabled} onClick={() => void end(target)}>
             Disconnect
           </Button>
         )}

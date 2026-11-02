@@ -144,10 +144,8 @@ const linkOf = (origin: string, machine: typeof EditaiiMachine.Type): EditaiiVin
   maquina: machine.id,
   ambiente: machine.ambiente_t3,
 });
-const sameLink = (a: EditaiiVinculo | null, b: EditaiiVinculo | null) =>
-  a === null || b === null
-    ? a === b
-    : a.origem === b.origem && a.maquina === b.maquina && a.ambiente === b.ambiente;
+const sameLink = (a: EditaiiVinculo, b: EditaiiVinculo) =>
+  a.origem === b.origem && a.maquina === b.maquina && a.ambiente === b.ambiente;
 
 /** The link the panel shows: the connected machine's, or null while no machine is connected. */
 export const vinculoDo = (state: EditaiiConnectionState): EditaiiVinculo | null =>
@@ -190,13 +188,18 @@ export class EditaiiConnection extends Context.Service<
       projectId: ProjectId | null,
     ) => Effect.Effect<void, EditaiiConnectionError>;
     /**
-     * Disconnects if the link is the expected one: null while no machine is connected (it cancels
-     * a pairing), the connected link otherwise. Any other link is left as it is, and the result
-     * is false: a late request to abandon one link never disconnects the next.
+     * Disconnects if the connected link is the expected one. Any other link is left as it is, and
+     * the result is false: a late request to abandon one link never disconnects the next.
      */
     readonly disconnect: (
-      expected: EditaiiVinculo | null,
+      expected: EditaiiVinculo,
     ) => Effect.Effect<boolean, EditaiiConnectionError>;
+    /**
+     * Abandons the pairing attempt `attempt` (the state's `attempt`), also once interrupted or
+     * expired, if it is still the one under way; false otherwise. An attempt that became a
+     * connection is not cancelled: that is a disconnect, of a link someone saw.
+     */
+    readonly cancelPairing: (attempt: string) => Effect.Effect<boolean, EditaiiConnectionError>;
     /**
      * Runs `usar` with the session of the next connected period, in a scope of its own that the
      * connection owns, and returns when `usar` ends or the session does. Disconnecting, or
@@ -240,6 +243,7 @@ const make = Effect.gen(function* () {
     problem: null,
     canReopen: false,
     projectId: null,
+    attempt: null,
   });
 
   const publish = Effect.fn("EditaiiConnection.publish")(function* (
@@ -255,6 +259,7 @@ const make = Effect.gen(function* () {
         session !== undefined &&
         stored.expiresAt > (yield* clock.currentTimeMillis),
       projectId,
+      attempt: stored.phase === "pairing" || stored.phase === "redeeming" ? stored.attempt : null,
     };
     return yield* SubscriptionRef.set(view, next);
   });
@@ -791,21 +796,18 @@ const make = Effect.gen(function* () {
     yield* writes.withPermits(1)(write({ projectId: next }));
   });
 
-  const disconnect = Effect.fn("EditaiiConnection.disconnect")(function* (
-    expected: EditaiiVinculo | null,
-  ) {
-    yield* Deferred.await(ready);
-    yield* assertReadable();
-    // Comparing the link, releasing the session, closing what it owns and recording the
-    // disconnection are one transition: a cancellation in between would leave a closed attempt
-    // recorded as usable, and a redemption finishing in between would be a link nobody expected.
-    return yield* Effect.uninterruptible(
+  /**
+   * Ends the period `corresponde` recognizes in the record. Comparing it, releasing the session,
+   * closing what it owns and recording the disconnection are one transition: a cancellation in
+   * between would leave a closed attempt recorded as usable, and a redemption finishing in
+   * between would be a link nobody expected.
+   */
+  const encerrar = (corresponde: (record: Stored) => boolean) =>
+    Effect.uninterruptible(
       Effect.gen(function* () {
         const previous = yield* writes.withPermits(1)(
           Effect.sync(() => {
-            const current =
-              stored.phase === "connected" ? linkOf(stored.origin, stored.machine) : null;
-            if (!sameLink(current, expected)) return false;
+            if (!corresponde(stored)) return false;
             const released = session;
             session = undefined;
             return { released };
@@ -819,6 +821,25 @@ const make = Effect.gen(function* () {
         );
         return true;
       }),
+    );
+
+  const disconnect = Effect.fn("EditaiiConnection.disconnect")(function* (
+    expected: EditaiiVinculo,
+  ) {
+    yield* Deferred.await(ready);
+    yield* assertReadable();
+    return yield* encerrar(
+      (record) =>
+        record.phase === "connected" && sameLink(linkOf(record.origin, record.machine), expected),
+    );
+  }, commands.withPermits(1));
+
+  const cancelPairing = Effect.fn("EditaiiConnection.cancelPairing")(function* (attempt: string) {
+    yield* Deferred.await(ready);
+    yield* assertReadable();
+    return yield* encerrar(
+      (record) =>
+        (record.phase === "pairing" || record.phase === "redeeming") && record.attempt === attempt,
     );
   }, commands.withPermits(1));
 
@@ -850,6 +871,7 @@ const make = Effect.gen(function* () {
     startPairing,
     reopenBrowser,
     chooseProject,
+    cancelPairing,
     disconnect,
   });
 });

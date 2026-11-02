@@ -8,6 +8,8 @@
 import * as NodeCrypto from "node:crypto";
 
 import {
+  EditaiiJournalProblem,
+  EditaiiJournalUnavailableError,
   CommandId,
   MessageId,
   type ModelSelection,
@@ -31,6 +33,8 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as ServerConfig from "../config.ts";
 import type { EditaiiVinculo } from "./EditaiiConnection.ts";
@@ -46,13 +50,17 @@ export class EditaiiJournalError extends Schema.TaggedError<EditaiiJournalError>
      * future_version: written by a newer T3. invalid_data: a stored value no longer decodes.
      * conflict: the Worker contradicts what the journal recorded; nothing was overwritten.
      */
-    reason: Schema.Literals(["future_version", "invalid_data", "conflict", "storage"]),
+    reason: EditaiiJournalProblem,
     detail: Schema.String,
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
     return `Editaii journal ${this.reason}: ${this.detail}`;
+  }
+  /** Only the category crosses RPC: the detail names local files. */
+  toClientError() {
+    return new EditaiiJournalUnavailableError({ reason: this.reason });
   }
 }
 
@@ -112,6 +120,41 @@ export interface Observado {
   readonly trabalhoId: string;
   readonly aceitacao: Acceptance;
   readonly cursor: number | null;
+}
+
+/** A job's state here. */
+export type EstadoTrabalho =
+  | "entregue"
+  | "em_execucao"
+  | "aguardando_pessoa"
+  | "acao_no_t3"
+  | "concluido"
+  | "falhou"
+  | "parado";
+
+/** What a link still has under way: what disconnecting it would leave behind. */
+export interface Situacao {
+  /** The link is being abandoned: nothing more of it goes to the Worker. */
+  readonly desligando: boolean;
+  /** Jobs with activity in the T3 or something still owed to the Worker. */
+  readonly trabalhos: ReadonlyArray<{
+    readonly trabalhoId: string;
+    readonly conversaId: string;
+    /** The T3 thread the T3's acceptance of the request proved; none before it. */
+    readonly threadId: string | null;
+    readonly estado: EstadoTrabalho;
+    /** Events the Worker has not taken. Held ones (`retido`) wait on an event it refused. */
+    readonly eventosPendentes: number;
+    readonly retido: boolean;
+    /** A receipt the Worker has not taken. */
+    readonly reciboPendente: boolean;
+  }>;
+  /** Conversations that run nothing more: the T3 lost their thread, or the Worker refused. */
+  readonly conversasBloqueadas: ReadonlyArray<{
+    readonly conversaId: string;
+    readonly threadId: string | null;
+    readonly bloqueio: "conflito" | "thread_perdida";
+  }>;
 }
 
 export type Partida =
@@ -184,6 +227,17 @@ export interface EditaiiJournalShape {
   ) => Effect.Effect<void, EditaiiJournalError>;
   /** Records the intent to abandon the link; from then on it starts and sends nothing. */
   readonly desligar: (vinculo: EditaiiVinculo) => Effect.Effect<void, EditaiiJournalError>;
+  /**
+   * Reads what the link has under way. A pending receipt is one the connector would send, under the
+   * same rule as `partida`; an answer delivery left invoked counts for nothing by itself. A read:
+   * it signals no change.
+   */
+  readonly situacao: (vinculo: EditaiiVinculo) => Effect.Effect<Situacao, EditaiiJournalError>;
+  /**
+   * The journal's version, counting its committed transitions: the current one first, then each
+   * new one. Subscribe, then read, and no change is missed.
+   */
+  readonly mudancas: Stream.Stream<number>;
 }
 
 export class EditaiiJournal extends Context.Service<EditaiiJournal, EditaiiJournalShape>()(
@@ -439,16 +493,25 @@ type PendenciaRow = {
   readonly traducao: string | null;
 };
 
-/** The journal's operations over its open database. */
-const operacoes = (sql: SqlClient.SqlClient): EditaiiJournalShape => {
+/** The journal's operations over its open database; `gravou` signals each committed one. */
+const operacoes = (
+  sql: SqlClient.SqlClient,
+  gravou: Effect.Effect<void>,
+): Omit<EditaiiJournalShape, "mudancas"> => {
+  const comoErro =
+    (nome: string) =>
+    <E>(e: E) =>
+      isJournalError(e) || isConfiguracaoIlegivel(e) ? e : storage(nome)(e);
   /** One domain operation, one transaction. */
   const transacao = <A, E>(nome: string, efeito: Effect.Effect<A, E>) =>
     efeito.pipe(
       sql.withTransaction,
-      Effect.mapError((e) =>
-        isJournalError(e) || isConfiguracaoIlegivel(e) ? e : storage(nome)(e),
-      ),
+      Effect.mapError(comoErro(nome)),
+      Effect.tap(() => gravou),
     );
+  /** A consistent read, which changes nothing and signals nothing. */
+  const leitura = <A, E>(nome: string, efeito: Effect.Effect<A, E>) =>
+    efeito.pipe(sql.withTransaction, Effect.mapError(comoErro(nome)));
   const agora = Effect.map(DateTime.now, DateTime.formatIso);
 
   const garantirVinculo = (v: EditaiiVinculo, k: string) =>
@@ -678,6 +741,22 @@ const operacoes = (sql: SqlClient.SqlClient): EditaiiJournalShape => {
       ? { type: "aguardar" }
       : { type: "confirmar", entregaId, recibo };
   };
+  /** The receipts the Worker may not have taken: it never serves a confirmed delivery again. */
+  const recibosDevidos = Effect.fn(function* (k: string) {
+    const resolvidas = yield* sql<{
+      readonly entrega_id: string;
+      readonly trabalho_id: string;
+      readonly desfecho: string;
+    }>`SELECT entrega_id, trabalho_id, desfecho FROM entregas
+       WHERE vinculo = ${k} AND fase = 'resolvida' AND confirmacao IS NULL ORDER BY rowid`;
+    const devidos: Array<{ entregaId: string; trabalhoId: string; recibo: Protocol.Recibo }> = [];
+    for (const r of resolvidas) {
+      const recibo = reciboDe(yield* desfechoJson.decode(r.desfecho));
+      if (recibo !== null)
+        devidos.push({ entregaId: r.entrega_id, trabalhoId: r.trabalho_id, recibo });
+    }
+    return devidos;
+  });
   const aceitacaoDo = Effect.fn(function* (k: string, t: TrabalhoRow) {
     const row = yield* entrega(k, t.entrega_pedido);
     const d = row?.desfecho == null ? null : yield* desfechoJson.decode(row.desfecho);
@@ -1057,14 +1136,10 @@ const operacoes = (sql: SqlClient.SqlClient): EditaiiJournalShape => {
         yield* garantirVinculo(v, k);
         if (yield* desligando(k)) return { type: "desligar" } satisfies Partida;
         yield* sql`UPDATE conversas SET conferida = 0 WHERE vinculo = ${k}`;
-        const resolvidas = yield* sql<{ readonly entrega_id: string; readonly desfecho: string }>`
-          SELECT entrega_id, desfecho FROM entregas
-          WHERE vinculo = ${k} AND fase = 'resolvida' AND confirmacao IS NULL ORDER BY rowid`;
-        const confirmar: Array<{ entregaId: string; recibo: Protocol.Recibo }> = [];
-        for (const r of resolvidas) {
-          const recibo = reciboDe(yield* desfechoJson.decode(r.desfecho));
-          if (recibo !== null) confirmar.push({ entregaId: r.entrega_id, recibo });
-        }
+        const confirmar = (yield* recibosDevidos(k)).map(({ entregaId, recibo }) => ({
+          entregaId,
+          recibo,
+        }));
         const ativos = yield* sql<TrabalhoRow>`
           SELECT trabalho_id, conversa_id, entrega_pedido, estado, cursor, marco_t3 FROM trabalhos
           WHERE vinculo = ${k} AND estado IN ${sql.in(ATIVOS)} ORDER BY rowid`;
@@ -1078,7 +1153,62 @@ const operacoes = (sql: SqlClient.SqlClient): EditaiiJournalShape => {
     );
   };
 
-  return EditaiiJournal.of({
+  const situacao: EditaiiJournalShape["situacao"] = (v) => {
+    const k = chave(v);
+    return leitura(
+      "situation",
+      Effect.gen(function* () {
+        const abandonando = yield* desligando(k);
+        const devidos = new Set((yield* recibosDevidos(k)).map((r) => r.trabalhoId));
+        const linhas = yield* sql<{
+          readonly trabalho_id: string;
+          readonly conversa_id: string;
+          readonly estado: EstadoTrabalho;
+          readonly retido_em: string | null;
+          readonly desfecho: string | null;
+          readonly pendentes: number;
+        }>`SELECT t.trabalho_id, t.conversa_id, t.estado, t.retido_em, e.desfecho,
+             (SELECT COUNT(*) FROM eventos x WHERE x.vinculo = t.vinculo
+                AND x.trabalho_id = t.trabalho_id AND x.enviado_em IS NULL) AS pendentes
+           FROM trabalhos t
+           JOIN entregas e ON e.vinculo = t.vinculo AND e.entrega_id = t.entrega_pedido
+           WHERE t.vinculo = ${k} ORDER BY t.rowid`;
+        const trabalhos: Array<Situacao["trabalhos"][number]> = [];
+        for (const l of linhas) {
+          const eventosPendentes = abandonando ? 0 : l.pendentes;
+          const reciboPendente = !abandonando && devidos.has(l.trabalho_id);
+          if (!naoTerminou(l.estado) && eventosPendentes === 0 && !reciboPendente) continue;
+          const d = l.desfecho === null ? null : yield* desfechoJson.decode(l.desfecho);
+          trabalhos.push({
+            trabalhoId: l.trabalho_id,
+            conversaId: l.conversa_id,
+            threadId: d?.tipo === "aceita" ? d.aceitacao.threadId : null,
+            estado: l.estado,
+            eventosPendentes,
+            retido: l.retido_em !== null,
+            reciboPendente,
+          });
+        }
+        const conversasBloqueadas = yield* sql<{
+          readonly conversa_id: string;
+          readonly thread_associada: string | null;
+          readonly bloqueio: "conflito" | "thread_perdida";
+        }>`SELECT conversa_id, thread_associada, bloqueio FROM conversas
+           WHERE vinculo = ${k} AND bloqueio IS NOT NULL ORDER BY rowid`;
+        return {
+          desligando: abandonando,
+          trabalhos,
+          conversasBloqueadas: conversasBloqueadas.map((c) => ({
+            conversaId: c.conversa_id,
+            threadId: c.thread_associada,
+            bloqueio: c.bloqueio,
+          })),
+        } satisfies Situacao;
+      }),
+    );
+  };
+
+  return {
     partida,
     receber,
     resolver,
@@ -1087,7 +1217,8 @@ const operacoes = (sql: SqlClient.SqlClient): EditaiiJournalShape => {
     proximoEvento,
     eventoEnviado,
     desligar,
-  });
+    situacao,
+  };
 };
 
 /**
@@ -1101,7 +1232,9 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const escopo = yield* Effect.scope;
   const abertura = yield* Semaphore.make(1);
-  let aberto: EditaiiJournalShape | undefined;
+  const versao = yield* SubscriptionRef.make(0);
+  const gravou = SubscriptionRef.update(versao, (n) => n + 1);
+  let aberto: Omit<EditaiiJournalShape, "mudancas"> | undefined;
 
   // What a failed attempt opened is closed with it.
   const abrirArquivo = Effect.gen(function* () {
@@ -1113,7 +1246,7 @@ const make = Effect.gen(function* () {
       Scope.provide(tentativa),
       Effect.onError((cause) => Scope.close(tentativa, Exit.failCause(cause))),
     );
-    aberto = operacoes(sql);
+    aberto = operacoes(sql, gravou);
     return aberto;
   });
   const journal = Effect.suspend(() =>
@@ -1126,7 +1259,7 @@ const make = Effect.gen(function* () {
 
   const depoisDeAbrir =
     <A extends ReadonlyArray<unknown>, B, E>(
-      operacao: (j: EditaiiJournalShape) => (...args: A) => Effect.Effect<B, E>,
+      operacao: (j: Omit<EditaiiJournalShape, "mudancas">) => (...args: A) => Effect.Effect<B, E>,
     ) =>
     (...args: A) =>
       Effect.flatMap(journal, (j) => operacao(j)(...args));
@@ -1139,6 +1272,8 @@ const make = Effect.gen(function* () {
     proximoEvento: depoisDeAbrir((j) => j.proximoEvento),
     eventoEnviado: depoisDeAbrir((j) => j.eventoEnviado),
     desligar: depoisDeAbrir((j) => j.desligar),
+    situacao: depoisDeAbrir((j) => j.situacao),
+    mudancas: SubscriptionRef.changes(versao),
   });
 });
 

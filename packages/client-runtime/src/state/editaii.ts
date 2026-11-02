@@ -31,5 +31,9 @@ export function createEditaiiEnvironmentAtoms<R, E>(
       label: "editaii:disconnect",
       tag: WS_METHODS.editaiiDisconnect,
     }),
+    chooseProject: createEnvironmentRpcCommand(runtime, {
+      label: "editaii:choose-project",
+      tag: WS_METHODS.editaiiChooseProject,
+    }),
   };
 }

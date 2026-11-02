@@ -34,6 +34,7 @@ import * as Adapter from "./EditaiiT3Adapter.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as Receipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as CommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
+import * as ApplicationEvents from "../persistence/OrchestrationEventStore.ts";
 import * as Worker from "../orchestration-v2/EffectWorker.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
@@ -230,11 +231,13 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
     }),
   );
   const launch = Launch.layer.pipe(Layer.provide(Layer.mergeAll(external, threads, receipts)));
-  // What the T3 server gives the Editaii (EditaiiRuntime.ts), and the database it all runs on.
+  // What the T3 server gives the Editaii (EditaiiRuntime.ts), and the database it all runs on. The
+  // projects are a mock that never changes, so the application events need not be the T3's own.
   const dependencies = Layer.mergeAll(
     orchestration,
     receipts,
     repository,
+    ApplicationEvents.layer.pipe(Layer.provide(database)),
     threads,
     launch,
     projects,

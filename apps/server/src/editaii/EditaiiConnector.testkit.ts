@@ -37,6 +37,7 @@ import * as Connection from "./EditaiiConnection.ts";
 import * as Connector from "./EditaiiConnector.ts";
 import * as Journal from "./EditaiiJournal.ts";
 import * as Protocol from "./EditaiiProtocol.ts";
+import * as Painel from "./EditaiiPainel.ts";
 import * as Runtime from "./EditaiiRuntime.ts";
 import type * as Adapter from "./EditaiiT3Adapter.ts";
 
@@ -490,7 +491,7 @@ export const make = Effect.fn("EditaiiMaquina.make")(function* () {
   );
   /** Starts `servidor`, the T3 server's part, over the machine. */
   const subir = Effect.fn("EditaiiMaquina.subir")(function* <ROut, E>(
-    servidor: Layer.Layer<ROut | Connector.EditaiiConnector | Connection.EditaiiConnection, E>,
+    servidor: Layer.Layer<ROut | Connection.EditaiiConnection, E>,
   ) {
     const scope = yield* Scope.make();
     yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
@@ -500,7 +501,6 @@ export const make = Effect.fn("EditaiiMaquina.make")(function* () {
       parar: Scope.close(scope, Exit.void),
       context,
       connection,
-      connector: Context.get(context, Connector.EditaiiConnector),
       vinculo: connection.state.pipe(Effect.map(Connection.vinculoDo)),
       /** Waits until no link is connected. */
       desconectado: connection.changes.pipe(
@@ -526,6 +526,7 @@ export const make = Effect.fn("EditaiiMaquina.make")(function* () {
     ).pipe(
       Effect.map((ligado) => ({
         ...ligado,
+        connector: Context.get(ligado.context, Connector.EditaiiConnector),
         journal: Context.get(ligado.context, Journal.EditaiiJournal),
       })),
     );
@@ -535,7 +536,12 @@ export const make = Effect.fn("EditaiiMaquina.make")(function* () {
    * services of the T3 that `t3` builds; the journal is the real one, with no failures injected.
    */
   const montar = <ROut, E>(t3: Layer.Layer<ServicosDoT3 | ROut, E>) =>
-    subir(Runtime.layer.pipe(Layer.provideMerge(Layer.merge(deps, t3))));
+    subir(Runtime.layer.pipe(Layer.provideMerge(Layer.merge(deps, t3)))).pipe(
+      Effect.map((montado) => ({
+        ...montado,
+        painel: Context.get(montado.context, Painel.EditaiiPainel),
+      })),
+    );
   return {
     worker,
     mudou,

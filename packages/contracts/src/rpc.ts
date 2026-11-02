@@ -84,9 +84,13 @@ import {
 } from "./auth.ts";
 import { ClientActivityReportInput } from "./background.ts";
 import {
+  EditaiiChooseProjectInput,
   EditaiiConfigureInput,
+  EditaiiDisconnectInput,
+  EditaiiDisconnectResult,
+  EditaiiJournalUnavailableError,
+  EditaiiPanel,
   EditaiiStartPairingInput,
-  EditaiiConnectionState,
   EditaiiRequestError,
 } from "./editaii.ts";
 import {
@@ -515,6 +519,7 @@ export const WS_METHODS = {
   editaiiStartPairing: "editaii.startPairing",
   editaiiReopenBrowser: "editaii.reopenBrowser",
   editaiiDisconnect: "editaii.disconnect",
+  editaiiChooseProject: "editaii.chooseProject",
   editaiiSubscribe: "editaii.subscribe",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
@@ -831,12 +836,21 @@ const WsEditaiiReopenBrowserRpc = Rpc.make(WS_METHODS.editaiiReopenBrowser, {
   error: Schema.Union([EditaiiRequestError, EnvironmentAuthorizationError]),
 });
 const WsEditaiiDisconnectRpc = Rpc.make(WS_METHODS.editaiiDisconnect, {
-  payload: Schema.Struct({}),
+  payload: EditaiiDisconnectInput,
+  success: EditaiiDisconnectResult,
+  error: Schema.Union([
+    EditaiiRequestError,
+    EditaiiJournalUnavailableError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+const WsEditaiiChooseProjectRpc = Rpc.make(WS_METHODS.editaiiChooseProject, {
+  payload: EditaiiChooseProjectInput,
   error: Schema.Union([EditaiiRequestError, EnvironmentAuthorizationError]),
 });
 const WsEditaiiSubscribeRpc = Rpc.make(WS_METHODS.editaiiSubscribe, {
   payload: Schema.Struct({}),
-  success: EditaiiConnectionState,
+  success: EditaiiPanel,
   stream: true,
   error: EnvironmentAuthorizationError,
 });
@@ -2007,6 +2021,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsEditaiiStartPairingRpc,
   WsEditaiiReopenBrowserRpc,
   WsEditaiiDisconnectRpc,
+  WsEditaiiChooseProjectRpc,
   WsEditaiiSubscribeRpc,
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,

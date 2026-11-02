@@ -707,4 +707,94 @@ describe("the Editaii as the T3 server mounts it", () => {
         assert.deepEqual(m.worker.invalidos, []);
       }).pipe(Effect.scoped),
   );
+
+  it.effect(
+    "disconnecting with work under way is recorded first, and a restart takes nothing back",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* T3.harness("editaii-runtime-desligar");
+        const m = yield* Maquinas.make();
+        const t3 = yield* m.montar(h.dependencies);
+        yield* t3.connection.chooseProject(T3.projectId);
+        const liberado = yield* noT3(t3)(h.release());
+        m.worker.pedir(1);
+        const turn = yield* noT3(t3)(h.beginTurn(liberado));
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+
+        // The panel shows the job running in the T3, for the link it shows.
+        const painel = yield* t3.painel.estado.pipe(
+          Stream.filter(
+            (p) =>
+              p.activity?.type === "available" &&
+              p.activity.jobs.some((j) => j.state === "running"),
+          ),
+          Stream.runHead,
+        );
+        const activity = Option.getOrUndefined(painel)?.activity;
+        if (activity?.type !== "available") throw new Error("expected the activity");
+        assert.strictEqual(
+          yield* t3.painel.desligar({ type: "link", ...activity.link }),
+          "disconnected",
+        );
+        assert.strictEqual((yield* t3.connection.state).status, "disconnected");
+        // A late request for the same link changes nothing.
+        assert.strictEqual(
+          yield* t3.painel.desligar({ type: "link", ...activity.link }),
+          "not_current",
+        );
+        // The AI goes on in the T3, which a disconnect does not stop.
+        yield* noT3(t3)(h.finish(turn, "Feito depois de desligar"));
+        yield* t3.parar;
+
+        // Saved as connected again, as a restored record would be: the intent stands.
+        m.salvar("maquina-1");
+        const chamadas = m.worker.chamadas.length;
+        const depois = yield* m.montar(h.dependencies);
+        yield* depois.desconectado;
+        assert.deepEqual(m.worker.chamadas.slice(chamadas), []);
+        assert.strictEqual(m.worker.estado(1), "em_execucao");
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("a journal that cannot be read refuses to disconnect, and the panel says why", () =>
+    Effect.gen(function* () {
+      const h = yield* T3.harness("editaii-runtime-journal-ilegivel");
+      const m = yield* Maquinas.make();
+      const ativo = yield* Deferred.make<void>();
+      const t3 = yield* m.montar(
+        Layer.merge(
+          h.dependencies,
+          Layer.succeed(ServerActivation.ServerActivation, Deferred.await(ativo)),
+        ),
+      );
+      const { stateDir } = Context.get(t3.context, ServerConfig.ServerConfig);
+      const db = new NodeSqlite.DatabaseSync(NodePath.join(stateDir, "editaii.sqlite"));
+      db.exec("CREATE TABLE futuro (x); PRAGMA user_version = 99;");
+      db.close();
+      yield* Deferred.succeed(ativo, undefined);
+      yield* m.pausado;
+
+      const painel = yield* t3.painel.estado.pipe(
+        Stream.filter((p) => p.connector.journal !== null),
+        Stream.runHead,
+      );
+      assert.deepInclude(Option.getOrUndefined(painel), {
+        connector: { journal: "future_version" },
+      });
+      assert.deepInclude(Option.getOrUndefined(painel)?.activity, {
+        type: "unavailable",
+        reason: "future_version",
+      });
+      const link = Option.getOrUndefined(painel)?.activity?.link;
+      if (link === undefined) throw new Error("expected the link shown");
+      const recusa = yield* Effect.flip(t3.painel.desligar({ type: "link", ...link }));
+      assert.strictEqual(recusa._tag, "EditaiiJournalError");
+      assert.strictEqual(
+        recusa._tag === "EditaiiJournalError" ? recusa.reason : null,
+        "future_version",
+      );
+      assert.strictEqual((yield* t3.connection.state).status, "connected");
+    }).pipe(Effect.scoped),
+  );
 });

@@ -1,8 +1,7 @@
 /**
- * The Editaii as the T3 server mounts it: the link to the Editaii (EditaiiConnection) and the
- * connector that carries the link's work to this T3 once the server is active. A new conversation
- * runs as EditaiiConfiguracao reads it from the T3; the journal opens on first use, so a journal
- * that cannot be opened stops the connector and not the T3.
+ * The Editaii as the T3 server mounts it: the link (EditaiiConnection), the connector that carries
+ * its work to this T3 once the server is active, and the panel that shows both (EditaiiPainel).
+ * The journal opens on first use, so one that cannot be opened stops the connector, not the T3.
  */
 import * as Layer from "effect/Layer";
 
@@ -11,9 +10,11 @@ import * as Configuracao from "./EditaiiConfiguracao.ts";
 import * as Connection from "./EditaiiConnection.ts";
 import * as Connector from "./EditaiiConnector.ts";
 import * as Journal from "./EditaiiJournal.ts";
+import * as Painel from "./EditaiiPainel.ts";
 import * as Adapter from "./EditaiiT3Adapter.ts";
 
-export const layer = Connector.layer(Configuracao.ler).pipe(
+export const layer = Painel.layer.pipe(
+  Layer.provide(Connector.layer(Configuracao.ler)),
   Layer.provide(
     Layer.merge(
       Journal.layer,

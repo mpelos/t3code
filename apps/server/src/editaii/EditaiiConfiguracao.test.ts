@@ -23,8 +23,9 @@ const projeto: Project = {
   deletedAt: null,
 };
 
-/** Reads the configuration on a machine with this project chosen, these projects and settings. */
-const ler = (
+/** Reads `efeito` on a machine with this project chosen, these projects and settings. */
+const naMaquina = <A, E, R>(
+  efeito: Effect.Effect<A, E, R>,
   escolhido: ProjectId | null,
   options: {
     readonly projetos?: ReadonlyArray<Project>;
@@ -32,7 +33,7 @@ const ler = (
     readonly projetosIlegiveis?: boolean;
   } = {},
 ) =>
-  Configuracao.ler.pipe(
+  efeito.pipe(
     Effect.provide(
       Layer.mergeAll(
         Layer.mock(Connection.EditaiiConnection)({
@@ -43,6 +44,7 @@ const ler = (
             problem: null,
             canReopen: false,
             projectId: escolhido,
+            attempt: null,
           }),
         }),
         Layer.mock(ProjectService.ProjectService)({
@@ -65,6 +67,11 @@ const ler = (
       ),
     ),
   );
+
+const ler = (escolhido: ProjectId | null, options: Parameters<typeof naMaquina>[2] = {}) =>
+  naMaquina(Configuracao.ler, escolhido, options);
+const resolver = (escolhido: ProjectId | null, options: Parameters<typeof naMaquina>[2] = {}) =>
+  naMaquina(Configuracao.resolver, escolhido, options);
 
 describe("EditaiiConfiguracao", () => {
   it.effect("runs new conversations with what the T3 resolves for the chosen project", () =>
@@ -90,8 +97,28 @@ describe("EditaiiConfiguracao", () => {
     }),
   );
 
-  it.effect("says what to do when it cannot run them", () =>
+  it.effect("says why it cannot run them, to the panel and to the person in the Editaii", () =>
     Effect.gen(function* () {
+      const desativado = {
+        defaultModelSelection: GLOBAL,
+        projectSettingsOverrides: {
+          [PROJETO]: { providerInstances: { [GLOBAL.instanceId]: { enabled: false } } },
+        },
+      };
+      assert.deepEqual(
+        [
+          yield* resolver(null),
+          yield* resolver(PROJETO, { projetos: [] }),
+          yield* resolver(PROJETO, { settings: { defaultModelSelection: null } }),
+          yield* resolver(PROJETO, { settings: desativado }),
+        ],
+        [
+          { type: "incomplete", reason: "no_project", projectTitle: null },
+          { type: "incomplete", reason: "project_missing", projectTitle: null },
+          { type: "incomplete", reason: "no_model", projectTitle: "Licitações" },
+          { type: "incomplete", reason: "provider_disabled", projectTitle: "Licitações" },
+        ],
+      );
       const motivo = (c: Effect.Success<ReturnType<typeof ler>>) =>
         c.type === "indisponivel" ? c.motivo : "pronta";
       assert.include(motivo(yield* ler(null)), "Escolha");
@@ -100,19 +127,7 @@ describe("EditaiiConfiguracao", () => {
         motivo(yield* ler(PROJETO, { settings: { defaultModelSelection: null } })),
         'modelo padrão para o projeto "Licitações"',
       );
-      assert.include(
-        motivo(
-          yield* ler(PROJETO, {
-            settings: {
-              defaultModelSelection: GLOBAL,
-              projectSettingsOverrides: {
-                [PROJETO]: { providerInstances: { [GLOBAL.instanceId]: { enabled: false } } },
-              },
-            },
-          }),
-        ),
-        "desativado",
-      );
+      assert.include(motivo(yield* ler(PROJETO, { settings: desativado })), "desativado");
     }),
   );
 

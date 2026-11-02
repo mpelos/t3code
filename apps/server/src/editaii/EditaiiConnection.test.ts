@@ -237,6 +237,20 @@ const harness = Effect.fn("test.EditaiiConnection.harness")(function* (
   };
 });
 
+/** Cancels the pairing attempt the panel shows. */
+const cancelar = (connection: EditaiiConnection.EditaiiConnection["Service"]) =>
+  Effect.gen(function* () {
+    const { attempt } = yield* connection.state;
+    if (attempt === null) return yield* Effect.die("no pairing attempt shown");
+    return yield* connection.cancelPairing(attempt);
+  });
+/** The connected link the panel shows. */
+const mostrado = (state: EditaiiConnectionState) => {
+  const v = EditaiiConnection.vinculoDo(state);
+  if (v === null) throw new Error("no connected link shown");
+  return v;
+};
+
 const loopback = Effect.fn("test.EditaiiConnection.loopback")(function* (
   handle: Effect.Effect<
     HttpServerResponse.HttpServerResponse,
@@ -354,9 +368,9 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
         });
         expect(yield* decodePairing(new TextDecoder().decode(h.saved()))).toEqual(record);
         expect(h.urls).toHaveLength(0);
-        yield* h.connection.disconnect(null);
+        yield* cancelar(h.connection);
         const second = yield* h.begin();
-        yield* h.connection.disconnect(null);
+        yield* cancelar(h.connection);
         expect((yield* callback(second).pipe(Effect.result))._tag).toBe("Failure");
         expect(yield* h.connection.state).toMatchObject({
           status: "disconnected",
@@ -601,7 +615,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       const restarted = yield* h.restart();
       expect((yield* restarted.connection.state).problem).toBe("interrupted");
       expect(restarted.urls).toHaveLength(0);
-      yield* restarted.connection.disconnect(null);
+      yield* cancelar(restarted.connection);
       expect((yield* restarted.connection.state).status).toBe("disconnected");
     }),
   );
@@ -824,7 +838,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
         const h = yield* harness({ initial: CONNECTED });
         yield* h.connection.chooseProject(PROJECT);
         const state = yield* h.connection.state;
-        expect(yield* h.connection.disconnect(EditaiiConnection.vinculoDo(state))).toBe(true);
+        expect(yield* h.connection.disconnect(mostrado(state))).toBe(true);
         expect(yield* savedRecord(h)).toEqual({
           version: 2,
           environmentId: ENVIRONMENT,
@@ -867,7 +881,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       const url = yield* h.begin();
       yield* callback(url);
       yield* Deferred.await(started);
-      yield* h.connection.disconnect(null);
+      yield* cancelar(h.connection);
       yield* Deferred.await(ended);
       expect((yield* h.connection.state).status).toBe("disconnected");
       expect(new TextDecoder().decode(h.saved())).not.toContain("test-secret");
@@ -913,9 +927,9 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       const h = yield* harness();
       const url = yield* h.begin();
       // Runs until the listener is closing, then is cancelled there.
-      const disconnecting = yield* h.connection
-        .disconnect(null)
-        .pipe(Effect.forkChild({ startImmediately: true }));
+      const disconnecting = yield* cancelar(h.connection).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
       yield* Fiber.interrupt(disconnecting);
       expect(yield* h.connection.state).toMatchObject({ status: "disconnected", canReopen: false });
       expect(yield* decodeBody(new TextDecoder().decode(h.saved()))).toMatchObject({
@@ -1037,7 +1051,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
           )
           .pipe(Effect.forkChild);
         const session = yield* Deferred.await(started);
-        yield* h.connection.disconnect(EditaiiConnection.vinculoDo(yield* h.connection.state));
+        yield* h.connection.disconnect(mostrado(yield* h.connection.state));
         expect(yield* Deferred.isDone(ended)).toBe(true);
         expect(Exit.isSuccess(yield* Fiber.await(using))).toBe(true);
         expect((yield* session.proxima.pipe(Effect.flip)).reason).toBe("interrupted");
@@ -1155,9 +1169,8 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
   it.effect("a disconnect for a link that is not the current one changes nothing", () =>
     Effect.gen(function* () {
       const h = yield* harness({ initial: CONNECTED });
-      const link = EditaiiConnection.vinculoDo(yield* h.connection.state);
-      if (link === null) throw new Error("expected a connected link");
-      expect(yield* h.connection.disconnect(null)).toBe(false);
+      const link = mostrado(yield* h.connection.state);
+      expect(yield* h.connection.cancelPairing("tentativa-antiga")).toBe(false);
       expect(yield* h.connection.disconnect({ ...link, maquina: "outra" })).toBe(false);
       expect(yield* h.connection.disconnect({ ...link, origem: "https://outro.example" })).toBe(
         false,
@@ -1166,9 +1179,36 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       expect((yield* h.connection.state).status).toBe("connected");
       expect(yield* h.connection.disconnect(link)).toBe(true);
       expect((yield* h.connection.state).status).toBe("disconnected");
-      // Nothing is connected now: only a request that expects no link applies.
+      // Nothing is connected now: a late request for that link changes nothing.
       expect(yield* h.connection.disconnect(link)).toBe(false);
-      expect(yield* h.connection.disconnect(null)).toBe(true);
+    }),
+  );
+
+  it.effect("cancelling an attempt that is no longer the one under way changes nothing", () =>
+    Effect.gen(function* () {
+      const h = yield* harness();
+      yield* h.begin();
+      const antiga = (yield* h.connection.state).attempt;
+      expect(antiga).not.toBeNull();
+      expect(yield* cancelar(h.connection)).toBe(true);
+      yield* h.connection.startPairing({ machineName: "Office" });
+      const nova = (yield* h.connection.state).attempt;
+      expect(nova).not.toBe(antiga);
+      expect(yield* h.connection.cancelPairing(antiga ?? "")).toBe(false);
+      expect(yield* h.connection.state).toMatchObject({ status: "pairing", attempt: nova });
+    }),
+  );
+
+  it.effect("a late cancel of an attempt that became a connection does not disconnect it", () =>
+    Effect.gen(function* () {
+      const h = yield* harness();
+      const url = yield* h.begin();
+      const attempt = (yield* h.connection.state).attempt;
+      yield* callback(url);
+      yield* waitFor(h.connection, (state) => state.status === "connected");
+      expect(yield* h.connection.state).toMatchObject({ attempt: null });
+      expect(yield* h.connection.cancelPairing(attempt ?? "")).toBe(false);
+      expect((yield* h.connection.state).status).toBe("connected");
     }),
   );
 
@@ -1193,7 +1233,7 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
         )
         .pipe(Effect.scoped, Effect.forkChild);
       yield* Deferred.await(ready);
-      yield* h.connection.disconnect(EditaiiConnection.vinculoDo(yield* h.connection.state));
+      yield* h.connection.disconnect(mostrado(yield* h.connection.state));
       expect(yield* Deferred.isDone(released)).toBe(true);
       expect(yield* Deferred.isDone(helperEnded)).toBe(true);
       yield* Fiber.join(using);

@@ -4,6 +4,7 @@
  * T3 effect goes through the adapter (EditaiiT3Adapter.ts). How it works, its guarantees and
  * limits: docs/conector-t3.md in the editaii repository.
  */
+import type { EditaiiJournalProblem } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -13,6 +14,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import { forkParked } from "../serverActivation.ts";
 import * as Connection from "./EditaiiConnection.ts";
@@ -29,11 +31,17 @@ export class EditaiiConnector extends Context.Service<
     /**
      * Abandons the expected link. The intent is durable first: from then on nothing of that link
      * starts or is sent, also after a restart. Then the link is disconnected, which stops its
-     * work and waits for it, unless another link is connected by now. Never waits on the network.
+     * work and waits for it, unless another link is connected by now: then the result is false
+     * and that link is left as it is. Never waits on the network.
      */
     readonly desligar: (
       vinculo: Connection.EditaiiVinculo,
-    ) => Effect.Effect<void, Journal.EditaiiJournalError | Connection.EditaiiConnectionError>;
+    ) => Effect.Effect<boolean, Journal.EditaiiJournalError | Connection.EditaiiConnectionError>;
+    /**
+     * The journal problem that stopped the last connected period, until one starts again: the
+     * connector does nothing meanwhile. Emits the current value first.
+     */
+    readonly problema: Stream.Stream<EditaiiJournalProblem | null>;
   }
 >()("t3/editaii/EditaiiConnector") {}
 
@@ -62,6 +70,7 @@ const make = Effect.fn("EditaiiConnector.make")(function* <R>(
   const adapter = yield* Adapter.EditaiiT3Adapter;
   // A link the session found abandoned; it is disconnected from outside the session's work.
   const abandonado = yield* Ref.make<Connection.EditaiiVinculo | null>(null);
+  const problema = yield* SubscriptionRef.make<EditaiiJournalProblem | null>(null);
 
   /** Retries what did not land until it does; the session's end interrupts the wait. */
   const insistir = <A, E>(efeito: Effect.Effect<A, E>): Effect.Effect<A> =>
@@ -118,6 +127,7 @@ const make = Effect.fn("EditaiiConnector.make")(function* <R>(
   ) {
     const v = session.vinculo;
     const partida = yield* journal.partida(v);
+    yield* SubscriptionRef.set(problema, null);
     if (partida.type === "desligar") {
       yield* Ref.set(abandonado, v);
       return;
@@ -282,6 +292,11 @@ const make = Effect.fn("EditaiiConnector.make")(function* <R>(
       Effect.andThen(abandonar),
       Effect.catch((error) =>
         Effect.logError("Editaii connector stopped; retrying", error).pipe(
+          Effect.andThen(
+            error._tag === "EditaiiJournalError"
+              ? SubscriptionRef.set(problema, error.reason)
+              : Effect.void,
+          ),
           Effect.andThen(Effect.sleep(PAUSA)),
         ),
       ),
@@ -293,12 +308,12 @@ const make = Effect.fn("EditaiiConnector.make")(function* <R>(
     vinculo: Connection.EditaiiVinculo,
   ) {
     // Once the intent is written, the disconnect completes even if the caller goes away.
-    yield* journal
+    return yield* journal
       .desligar(vinculo)
       .pipe(Effect.andThen(connection.disconnect(vinculo)), Effect.uninterruptible);
   });
 
-  return EditaiiConnector.of({ desligar });
+  return EditaiiConnector.of({ desligar, problema: SubscriptionRef.changes(problema) });
 });
 
 export const layer = <R>(

@@ -139,6 +139,7 @@ describe("settings mutation authorization", () => {
         WS_METHODS.editaiiStartPairing,
         WS_METHODS.editaiiReopenBrowser,
         WS_METHODS.editaiiDisconnect,
+        WS_METHODS.editaiiChooseProject,
       ] as const;
       const editaii = WsRpcGroup.omit(
         ...[...WsRpcGroup.requests.keys()].filter(
@@ -155,8 +156,12 @@ describe("settings mutation authorization", () => {
         editaii.toLayerHandler(WS_METHODS.editaiiConfigure, handle),
         editaii.toLayerHandler(WS_METHODS.editaiiStartPairing, handle),
         editaii.toLayerHandler(WS_METHODS.editaiiReopenBrowser, handle),
-        editaii.toLayerHandler(WS_METHODS.editaiiDisconnect, handle),
+        editaii.toLayerHandler(WS_METHODS.editaiiDisconnect, () =>
+          handle().pipe(Effect.as("disconnected" as const)),
+        ),
+        editaii.toLayerHandler(WS_METHODS.editaiiChooseProject, handle),
       );
+      const attempt = { target: { type: "attempt", attempt: "tentativa" } } as const;
       const denied = yield* RpcTest.makeClient(editaii).pipe(
         Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([AuthOrchestrationReadScope]))),
       );
@@ -166,7 +171,8 @@ describe("settings mutation authorization", () => {
         ),
         denied[WS_METHODS.editaiiStartPairing]({ machineName: "Office" }).pipe(Effect.flip),
         denied[WS_METHODS.editaiiReopenBrowser]({}).pipe(Effect.flip),
-        denied[WS_METHODS.editaiiDisconnect]({}).pipe(Effect.flip),
+        denied[WS_METHODS.editaiiDisconnect](attempt).pipe(Effect.flip),
+        denied[WS_METHODS.editaiiChooseProject]({ projectId: null }).pipe(Effect.flip),
       ]))
         expect(result).toMatchObject({ requiredPermission: AuthSettingsWriteScope });
       expect(handled).toBe(0);
@@ -176,8 +182,9 @@ describe("settings mutation authorization", () => {
       yield* allowed[WS_METHODS.editaiiConfigure]({ origin: "https://editaii.example" });
       yield* allowed[WS_METHODS.editaiiStartPairing]({ machineName: "Office" });
       yield* allowed[WS_METHODS.editaiiReopenBrowser]({});
-      yield* allowed[WS_METHODS.editaiiDisconnect]({});
-      expect(handled).toBe(4);
+      yield* allowed[WS_METHODS.editaiiDisconnect](attempt);
+      yield* allowed[WS_METHODS.editaiiChooseProject]({ projectId: null });
+      expect(handled).toBe(5);
     }).pipe(Effect.scoped),
   );
 

@@ -103,6 +103,7 @@ describe("command permissions", () => {
     WS_METHODS.editaiiStartPairing,
     WS_METHODS.editaiiReopenBrowser,
     WS_METHODS.editaiiDisconnect,
+    WS_METHODS.editaiiChooseProject,
   ])("requires the destination settings grant for %s", (method) =>
     Effect.scoped(
       Effect.gen(function* () {

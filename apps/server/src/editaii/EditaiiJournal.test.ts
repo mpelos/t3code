@@ -18,6 +18,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import * as EditaiiJournal from "./EditaiiJournal.ts";
@@ -997,6 +998,106 @@ describe("EditaiiJournal requests", () => {
           );
           assert.strictEqual(yield* j.observar(V1, "trabalho-1", answer("Pronto")), "fim");
           assert.deepEqual(tipos(yield* enviar(j)), ["trabalho-1:1:resposta"]);
+        }),
+      );
+    }).pipe(Effect.scoped),
+  );
+});
+
+describe("EditaiiJournal situation", () => {
+  it.effect("lists activity in the T3 and what the Worker has not taken, by the start's rule", () =>
+    Effect.gen(function* () {
+      const a = yield* ambiente;
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          const linha = (s: EditaiiJournal.Situacao) =>
+            s.trabalhos.map(
+              (t) =>
+                `${t.trabalhoId}:${t.estado}:${t.eventosPendentes}:${t.reciboPendente}:${t.threadId !== null}`,
+            );
+          // Accepted, its receipt not taken yet.
+          const um = planoDoPedido(yield* j.receber(V1, pedido(1), pronta));
+          yield* j.resolver(V1, "entrega-1", { tipo: "aceita", aceitacao: aceitacao(um) });
+          // Ended here, its answer not sent yet.
+          yield* iniciar(j, V1, pedido(2, { id: "conversa-2" }));
+          yield* j.observar(V1, "trabalho-2", answer("Dois"));
+          // Refused by the T3: settled with no receipt, only its failure to send.
+          yield* j.receber(V1, pedido(3, { id: "conversa-3" }), pronta);
+          yield* j.resolver(V1, "entrega-3", { tipo: "recusada" });
+          // Its receipt refused by the Worker: the job ends with nothing owed, the conversation stops.
+          const quatro = planoDoPedido(
+            yield* j.receber(V1, pedido(4, { id: "conversa-4" }), pronta),
+          );
+          yield* j.resolver(V1, "entrega-4", { tipo: "aceita", aceitacao: aceitacao(quatro) });
+          yield* j.confirmada(V1, "entrega-4", "conflito");
+
+          const antes = yield* j.situacao(V1);
+          assert.deepEqual(linha(antes), [
+            "trabalho-1:entregue:0:true:true",
+            "trabalho-2:concluido:1:false:true",
+            "trabalho-3:falhou:1:false:false",
+          ]);
+          assert.deepEqual(
+            antes.conversasBloqueadas.map((c) => c.conversaId),
+            ["conversa-4"],
+          );
+          assert.isFalse(antes.desligando);
+
+          // Sent and taken: only the job whose receipt is still owed is left.
+          yield* enviar(j);
+          assert.deepEqual(linha(yield* j.situacao(V1)), ["trabalho-1:entregue:0:true:true"]);
+          yield* j.confirmada(V1, "entrega-1", "ok");
+          assert.deepEqual(linha(yield* j.situacao(V1)), ["trabalho-1:em_execucao:0:false:true"]);
+          yield* j.observar(V1, "trabalho-1", answer("Um"));
+          yield* enviar(j);
+          assert.deepEqual(linha(yield* j.situacao(V1)), []);
+          // Another link has nothing of this one.
+          assert.deepEqual((yield* j.situacao(V2)).trabalhos, []);
+        }),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("once the link is being abandoned, its jobs owe the Worker nothing more", () =>
+    Effect.gen(function* () {
+      const a = yield* ambiente;
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          yield* iniciar(j);
+          yield* j.observar(V1, "trabalho-1", question("X"));
+          const um = planoDoPedido(yield* j.receber(V1, pedido(2, { id: "conversa-2" }), pronta));
+          yield* j.resolver(V1, "entrega-2", { tipo: "aceita", aceitacao: aceitacao(um) });
+          yield* j.desligar(V1);
+          const s = yield* j.situacao(V1);
+          assert.isTrue(s.desligando);
+          // Still running in the T3, which a disconnect does not stop.
+          assert.deepEqual(
+            s.trabalhos.map((t) => [t.trabalhoId, t.estado, t.eventosPendentes, t.reciboPendente]),
+            [
+              ["trabalho-1", "aguardando_pessoa", 0, false],
+              ["trabalho-2", "entregue", 0, false],
+            ],
+          );
+        }),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("reading it signals no change; each committed transition does", () =>
+    Effect.gen(function* () {
+      const a = yield* ambiente;
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          const versao = j.mudancas.pipe(
+            Stream.runHead,
+            Effect.map((v) => (v._tag === "Some" ? v.value : -1)),
+          );
+          yield* iniciar(j);
+          const antes = yield* versao;
+          yield* j.situacao(V1);
+          assert.strictEqual(yield* versao, antes);
+          yield* j.observar(V1, "trabalho-1", answer("Um"));
+          assert.strictEqual(yield* versao, antes + 1);
         }),
       );
     }).pipe(Effect.scoped),
