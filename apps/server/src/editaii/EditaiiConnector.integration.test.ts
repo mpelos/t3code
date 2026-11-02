@@ -1,3 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off -- A journal file prepared on disk, as a newer T3 leaves it.
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
+
 /**
  * The connector over the real T3: orchestrator, receipts, thread launch and management, with a
  * scripted provider (EditaiiT3Adapter.testkit.ts), and the strict fake Worker
@@ -5,7 +10,7 @@
  * the mark that says there is work for it.
  */
 import { assert, describe, it } from "@effect/vitest";
-import { CommandId } from "@t3tools/contracts";
+import { CommandId, ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -24,6 +29,8 @@ import * as Adapter from "./EditaiiT3Adapter.ts";
 import * as Receipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as Worker from "../orchestration-v2/EffectWorker.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ServerConfig from "../config.ts";
+import * as ServerActivation from "../serverActivation.ts";
 
 const configuracao = Effect.succeed<Journal.Configuracao>({
   type: "pronta",
@@ -103,7 +110,7 @@ const primeiroPedido = Effect.fn("test.primeiroPedido")(function* (
   h: Effect.Success<ReturnType<typeof T3.harness>>,
   copia?: string,
 ) {
-  const t3 = yield* m.ligar(h.layer);
+  const t3 = yield* m.ligar(h.layer, configuracao);
   const liberado = yield* noT3(t3)(h.release());
   m.worker.pedir(1);
   const turn = yield* noT3(t3)(h.beginTurn(liberado));
@@ -124,8 +131,8 @@ describe("EditaiiConnector over the real T3", () => {
   it.effect("a request, a question with native values and its answer, through to the result", () =>
     Effect.gen(function* () {
       const h = yield* T3.harness("editaii-connector-ponta");
-      const m = yield* Maquinas.make(configuracao);
-      const t3 = yield* m.ligar(h.layer);
+      const m = yield* Maquinas.make();
+      const t3 = yield* m.ligar(h.layer, configuracao);
       const worker = Context.get(t3.context, Worker.OrchestrationEffectWorkerV2);
 
       // Watch for the release before the person asks, so it cannot pass unseen.
@@ -200,8 +207,8 @@ describe("EditaiiConnector over the real T3", () => {
     () =>
       Effect.gen(function* () {
         const h = yield* T3.harness("editaii-connector-aprovacao");
-        const m = yield* Maquinas.make(configuracao);
-        const t3 = yield* m.ligar(h.layer);
+        const m = yield* Maquinas.make();
+        const t3 = yield* m.ligar(h.layer, configuracao);
         const worker = Context.get(t3.context, Worker.OrchestrationEffectWorkerV2);
         const liberado = yield* noT3(t3)(h.release());
         m.worker.pedir(1);
@@ -245,9 +252,12 @@ describe("EditaiiConnector over the real T3", () => {
     () =>
       Effect.gen(function* () {
         const h = yield* T3.harness("editaii-connector-superada");
-        const m = yield* Maquinas.make(configuracao);
+        const m = yield* Maquinas.make();
         const chamadas = { accept: 0, respond: 0 };
-        const t3 = yield* m.ligar(contando(chamadas).pipe(Layer.provideMerge(h.layer)));
+        const t3 = yield* m.ligar(
+          contando(chamadas).pipe(Layer.provideMerge(h.layer)),
+          configuracao,
+        );
         const worker = Context.get(t3.context, Worker.OrchestrationEffectWorkerV2);
         const liberado = yield* noT3(t3)(h.release());
         m.worker.pedir(1);
@@ -315,8 +325,8 @@ describe("EditaiiConnector over the real T3", () => {
         const h = yield* T3.harness("editaii-connector-leitura-velha", `${dir}/t3.sqlite`, {
           recoverOnStartup: true,
         });
-        const m = yield* Maquinas.make(configuracao);
-        const antes = yield* m.ligar(h.layer);
+        const m = yield* Maquinas.make();
+        const antes = yield* m.ligar(h.layer, configuracao);
         const liberado = yield* noT3(antes)(h.release());
         m.worker.pedir(1);
         const turn = yield* noT3(antes)(h.beginTurn(liberado));
@@ -337,7 +347,7 @@ describe("EditaiiConnector over the real T3", () => {
           chegou,
           solta,
         );
-        const depois = yield* m.ligar(lenta.pipe(Layer.provideMerge(h.layer)));
+        const depois = yield* m.ligar(lenta.pipe(Layer.provideMerge(h.layer)), configuracao);
         yield* Deferred.await(chegou);
         // Meanwhile the person answers in the T3, then in the Editaii, which the T3 no longer takes.
         yield* noT3(depois)(
@@ -382,8 +392,8 @@ describe("EditaiiConnector over the real T3", () => {
         const h = yield* T3.harness("editaii-connector-reinicio", `${dir}/t3.sqlite`, {
           recoverOnStartup: true,
         });
-        const m = yield* Maquinas.make(configuracao);
-        const antes = yield* m.ligar(h.layer);
+        const m = yield* Maquinas.make();
+        const antes = yield* m.ligar(h.layer, configuracao);
         const liberado = yield* noT3(antes)(h.release());
         m.worker.pedir(1);
         const turn = yield* noT3(antes)(h.beginTurn(liberado));
@@ -394,7 +404,7 @@ describe("EditaiiConnector over the real T3", () => {
 
         // The T3 starts again on its file: the live run is gone, and the question is answered by
         // message. The Editaii still offers it.
-        const depois = yield* m.ligar(h.layer);
+        const depois = yield* m.ligar(h.layer, configuracao);
         const [intervencao] = m.worker.aplicados;
         if (intervencao?.tipo !== "intervencao") return assert.fail("expected the intervention");
         m.worker.responder(
@@ -425,9 +435,12 @@ describe("EditaiiConnector over the real T3", () => {
     () =>
       Effect.gen(function* () {
         const h = yield* T3.harness("editaii-connector-queda");
-        const m = yield* Maquinas.make(configuracao);
+        const m = yield* Maquinas.make();
         const chamadas = { accept: 0, respond: 0 };
-        const t3 = yield* m.ligar(contando(chamadas).pipe(Layer.provideMerge(h.layer)));
+        const t3 = yield* m.ligar(
+          contando(chamadas).pipe(Layer.provideMerge(h.layer)),
+          configuracao,
+        );
         const worker = Context.get(t3.context, Worker.OrchestrationEffectWorkerV2);
         const recibo = (n: number) => JSON.parse(m.worker.confirmacoes[n]?.recibo ?? "null");
 
@@ -494,8 +507,8 @@ describe("EditaiiConnector over the real T3", () => {
         const h = yield* T3.harness("editaii-connector-respondida", `${dir}/t3.sqlite`, {
           recoverOnStartup: true,
         });
-        const m = yield* Maquinas.make(configuracao);
-        const t3 = yield* m.ligar(h.layer);
+        const m = yield* Maquinas.make();
+        const t3 = yield* m.ligar(h.layer, configuracao);
         const liberado = yield* noT3(t3)(h.release());
         m.worker.pedir(1);
         const turn = yield* noT3(t3)(h.beginTurn(liberado));
@@ -522,7 +535,7 @@ describe("EditaiiConnector over the real T3", () => {
         const r = yield* T3.harness("editaii-connector-antes-da-resposta", restaurado, {
           recoverOnStartup: true,
         });
-        const depois = yield* m.ligar(r.layer);
+        const depois = yield* m.ligar(r.layer, configuracao);
         const { snapshotSequence, projection } = yield* noT3(depois)(
           Orchestrator.OrchestratorV2.use((engine) => engine.getThreadSnapshot(turn.threadId)),
         );
@@ -551,10 +564,10 @@ describe("EditaiiConnector over the real T3", () => {
         const h = yield* T3.harness("editaii-connector-intacto", `${dir}/t3.sqlite`, {
           recoverOnStartup: true,
         });
-        const m = yield* Maquinas.make(configuracao);
+        const m = yield* Maquinas.make();
         const { turn } = yield* primeiroPedido(m, h);
 
-        const t3 = yield* m.ligar(h.layer);
+        const t3 = yield* m.ligar(h.layer, configuracao);
         m.worker.pedir(2);
         // The request's receipt reached the Worker: the T3 took it, on the conversation's thread.
         yield* m.quando(() => m.worker.estado(2) === "em_execucao");
@@ -574,7 +587,7 @@ describe("EditaiiConnector over the real T3", () => {
           const h = yield* T3.harness("editaii-connector-original", `${dir}/t3.sqlite`, {
             recoverOnStartup: true,
           });
-          const m = yield* Maquinas.make(configuracao);
+          const m = yield* Maquinas.make();
           // The backup is taken while the run is live; the end comes after it.
           const { turn, sequencia } = yield* primeiroPedido(m, h, restaurado);
 
@@ -592,7 +605,7 @@ describe("EditaiiConnector over the real T3", () => {
             assert.isAtLeast(yield* engine.getThreadEventSequence(turn.threadId), sequencia);
           }).pipe(Effect.provide(r.layer), Effect.scoped);
 
-          yield* m.ligar(r.layer);
+          yield* m.ligar(r.layer, configuracao);
           m.worker.pedir(2);
           yield* m.quando(() => m.worker.estado(2) === "reconciliacao");
           assert.strictEqual(yield* Queue.size(r.started), 0);
@@ -605,4 +618,93 @@ describe("EditaiiConnector over the real T3", () => {
         }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
   });
+});
+
+describe("the Editaii as the T3 server mounts it", () => {
+  it.effect(
+    "waits for the server to be active, then runs a request in the project chosen in the panel",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* T3.harness("editaii-runtime");
+        const m = yield* Maquinas.make();
+        const ativo = yield* Deferred.make<void>();
+        m.worker.pedir(1);
+        const t3 = yield* m.montar(
+          Layer.merge(
+            h.dependencies,
+            Layer.succeed(ServerActivation.ServerActivation, Deferred.await(ativo)),
+          ),
+        );
+        // Built and parked: nothing reached the Worker before the server is active.
+        assert.deepEqual(m.worker.chamadas, []);
+        yield* Deferred.succeed(ativo, undefined);
+
+        // No project chosen yet: the request fails with what to do, and starts no thread.
+        yield* m.quando(() => m.worker.estado(1) === "falhou");
+        const [falha] = m.worker.aplicados;
+        assert.include(falha?.tipo === "falha" ? falha.motivo : undefined, "Escolha");
+
+        // The choice goes to the connection's record, which the T3 now saves as version 2.
+        yield* t3.connection.chooseProject(T3.projectId);
+        assert.deepInclude(m.registro(), { version: 2, projectId: T3.projectId });
+
+        const liberado = yield* noT3(t3)(h.release());
+        m.worker.pedir(2, "conversa-2");
+        const turn = yield* noT3(t3)(h.beginTurn(liberado));
+        yield* m.quando(() => m.worker.estado(2) === "em_execucao");
+        // The thread runs as the T3 resolves a new thread in that project.
+        const thread = yield* noT3(t3)(
+          Orchestrator.OrchestratorV2.use((engine) => engine.getThreadShell(turn.threadId)),
+        );
+        assert.deepInclude(thread, {
+          projectId: T3.projectId,
+          modelSelection: T3.modelSelection,
+          runtimeMode: "full-access",
+        });
+        const recibo = m.worker.confirmacoes.find((c) => c.entregaId === "entrega-2");
+        assert.include(JSON.parse(recibo?.recibo ?? "{}"), {
+          thread: turn.threadId,
+          run: turn.runId,
+        });
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "a journal that cannot be opened stops the connector, not the T3, until it is repaired",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* T3.harness("editaii-runtime-journal");
+        const m = yield* Maquinas.make();
+        const ativo = yield* Deferred.make<void>();
+        m.worker.pedir(1);
+        const t3 = yield* m.montar(
+          Layer.merge(
+            h.dependencies,
+            Layer.succeed(ServerActivation.ServerActivation, Deferred.await(ativo)),
+          ),
+        );
+        // A journal from a newer T3.
+        const { stateDir } = Context.get(t3.context, ServerConfig.ServerConfig);
+        const arquivo = NodePath.join(stateDir, "editaii.sqlite");
+        const db = new NodeSqlite.DatabaseSync(arquivo);
+        db.exec("CREATE TABLE futuro (x); PRAGMA user_version = 99;");
+        db.close();
+        yield* Deferred.succeed(ativo, undefined);
+
+        // The connector stops before taking any work, and waits to try again.
+        yield* m.pausado;
+        assert.deepEqual(m.worker.chamadas, []);
+        assert.strictEqual(m.worker.estado(1), "aguardando");
+        // The T3 runs.
+        const engine = Context.get(t3.context, Orchestrator.OrchestratorV2);
+        assert.isNull(yield* engine.getThreadShell(ThreadId.make("qualquer")));
+
+        // Repaired, it is opened at the next try, with no restart: the request is taken.
+        NodeFS.rmSync(arquivo);
+        yield* m.pausa;
+        yield* m.quando(() => m.worker.estado(1) === "falhou");
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped),
+  );
 });

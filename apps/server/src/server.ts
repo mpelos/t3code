@@ -38,7 +38,7 @@ import { fixPath } from "./os-jank.ts";
 import * as Ws from "./ws.ts";
 import * as AgentScopeLive from "./process/agentScope.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
-import * as EditaiiConnection from "./editaii/EditaiiConnection.ts";
+import * as EditaiiRuntime from "./editaii/EditaiiRuntime.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
 import * as PullRequestHttp from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
@@ -584,10 +584,7 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 );
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
-  Layer.effectDiscard(EditaiiConnection.EditaiiConnection).pipe(
-    Layer.provideMerge(EditaiiConnection.layer),
-    Layer.provide(ExternalLauncher.layer),
-  ),
+  EditaiiRuntime.layer.pipe(Layer.provide(ExternalLauncher.layer)),
   AgentAwarenessRelay.layer,
   HeldHooksWaker.layer,
   layerThreadSettlementWorker,

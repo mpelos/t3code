@@ -23,10 +23,13 @@ import * as Arr from "effect/Array";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
@@ -436,15 +439,8 @@ type PendenciaRow = {
   readonly traducao: string | null;
 };
 
-const make = Effect.gen(function* () {
-  const { stateDir } = yield* ServerConfig.ServerConfig;
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  yield* fs
-    .makeDirectory(stateDir, { recursive: true })
-    .pipe(Effect.mapError(storage("state dir")));
-  const sql = yield* open(path.join(stateDir, "editaii.sqlite"));
-
+/** The journal's operations over its open database. */
+const operacoes = (sql: SqlClient.SqlClient): EditaiiJournalShape => {
   /** One domain operation, one transaction. */
   const transacao = <A, E>(nome: string, efeito: Effect.Effect<A, E>) =>
     efeito.pipe(
@@ -1091,6 +1087,58 @@ const make = Effect.gen(function* () {
     proximoEvento,
     eventoEnviado,
     desligar,
+  });
+};
+
+/**
+ * The file opens on first use, not at startup. A journal that cannot be opened fails each
+ * operation with why and is tried again on the next one: the T3 runs without it, and a repaired
+ * file is taken up without a restart.
+ */
+const make = Effect.gen(function* () {
+  const { stateDir } = yield* ServerConfig.ServerConfig;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const escopo = yield* Effect.scope;
+  const abertura = yield* Semaphore.make(1);
+  let aberto: EditaiiJournalShape | undefined;
+
+  // What a failed attempt opened is closed with it.
+  const abrirArquivo = Effect.gen(function* () {
+    yield* fs
+      .makeDirectory(stateDir, { recursive: true })
+      .pipe(Effect.mapError(storage("state dir")));
+    const tentativa = yield* Scope.fork(escopo);
+    const sql = yield* open(path.join(stateDir, "editaii.sqlite")).pipe(
+      Scope.provide(tentativa),
+      Effect.onError((cause) => Scope.close(tentativa, Exit.failCause(cause))),
+    );
+    aberto = operacoes(sql);
+    return aberto;
+  });
+  const journal = Effect.suspend(() =>
+    aberto !== undefined
+      ? Effect.succeed(aberto)
+      : abertura.withPermits(1)(
+          Effect.suspend(() => (aberto !== undefined ? Effect.succeed(aberto) : abrirArquivo)),
+        ),
+  );
+
+  const depoisDeAbrir =
+    <A extends ReadonlyArray<unknown>, B, E>(
+      operacao: (j: EditaiiJournalShape) => (...args: A) => Effect.Effect<B, E>,
+    ) =>
+    (...args: A) =>
+      Effect.flatMap(journal, (j) => operacao(j)(...args));
+  return EditaiiJournal.of({
+    partida: depoisDeAbrir((j) => j.partida),
+    receber: depoisDeAbrir((j) => j.receber),
+    resolver: depoisDeAbrir((j) => j.resolver),
+    confirmada: depoisDeAbrir((j) => j.confirmada),
+    observar: depoisDeAbrir((j) => j.observar),
+    proximoEvento: depoisDeAbrir((j) => j.proximoEvento),
+    eventoEnviado: depoisDeAbrir((j) => j.eventoEnviado),
+    desligar: depoisDeAbrir((j) => j.desligar),
   });
 });
 

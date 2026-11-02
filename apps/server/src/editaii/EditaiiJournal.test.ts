@@ -75,12 +75,17 @@ const preparar = (stateDir: string, arquivo: string, comandos: string) => {
   db.close();
 };
 
+/** Any operation; the file opens with the first one. */
+const tocar = (a: Effect.Success<typeof ambiente>) => usar(a, (j) => j.proximoEvento(V1));
+
 describe("EditaiiJournal format", () => {
   it.effect("opens its own WAL file at the current version, and reopens it as it is", () => {
     return Effect.gen(function* () {
       const a = yield* ambiente;
       yield* a.abrir(Effect.void);
-      yield* a.abrir(Effect.void);
+      assert.isFalse(NodeFS.existsSync(a.arquivo), "nothing is opened before it is used");
+      yield* tocar(a);
+      yield* tocar(a);
       assert.equal(
         ler<{ journal_mode: string }>(a.arquivo, "PRAGMA journal_mode")[0]?.journal_mode,
         "wal",
@@ -102,7 +107,7 @@ describe("EditaiiJournal format", () => {
     return Effect.gen(function* () {
       const a = yield* ambiente;
       preparar(a.stateDir, a.arquivo, "CREATE TABLE futuro (x); PRAGMA user_version = 2;");
-      const exit = yield* Effect.exit(a.abrir(Effect.void));
+      const exit = yield* Effect.exit(tocar(a));
       assert.isTrue(Exit.isFailure(exit));
       assert.include(String(exit), "future_version");
       assert.equal(versao(a.arquivo), 2);
@@ -115,11 +120,34 @@ describe("EditaiiJournal format", () => {
       const a = yield* ambiente;
       // The upgrade fails halfway, when it reaches a table that is already there.
       preparar(a.stateDir, a.arquivo, "CREATE TABLE eventos (x);");
-      const exit = yield* Effect.exit(a.abrir(Effect.void));
+      const exit = yield* Effect.exit(tocar(a));
       assert.isTrue(Exit.isFailure(exit));
       assert.include(String(exit), "storage");
       assert.equal(versao(a.arquivo), 0);
       assert.deepEqual(tabelas(a.arquivo), ["eventos"]);
+    }).pipe(Effect.scoped);
+  });
+
+  it.effect("a journal that cannot be opened fails each use and is opened once repaired", () => {
+    return Effect.gen(function* () {
+      const a = yield* ambiente;
+      preparar(a.stateDir, a.arquivo, "CREATE TABLE futuro (x); PRAGMA user_version = 2;");
+      yield* a.abrir(
+        Effect.gen(function* () {
+          const journal = yield* EditaiiJournal.EditaiiJournal;
+          for (const _ of [1, 2]) {
+            const exit = yield* Effect.exit(journal.partida(V1));
+            assert.include(String(exit), "future_version");
+          }
+          NodeFS.rmSync(a.arquivo);
+          assert.deepEqual(yield* journal.partida(V1), {
+            type: "retomar",
+            confirmar: [],
+            observar: [],
+          });
+          assert.equal(versao(a.arquivo), 1);
+        }),
+      );
     }).pipe(Effect.scoped);
   });
 });

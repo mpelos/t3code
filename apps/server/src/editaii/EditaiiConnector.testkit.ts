@@ -37,6 +37,7 @@ import * as Connection from "./EditaiiConnection.ts";
 import * as Connector from "./EditaiiConnector.ts";
 import * as Journal from "./EditaiiJournal.ts";
 import * as Protocol from "./EditaiiProtocol.ts";
+import * as Runtime from "./EditaiiRuntime.ts";
 import type * as Adapter from "./EditaiiT3Adapter.ts";
 
 const ORIGIN = "https://editaii.example";
@@ -372,9 +373,7 @@ const PAUSA = Duration.seconds(5);
  * crash, since every step it took is already durable. Nothing here waits on time: `quando` waits
  * for the next change, and the clock moves only when a test moves it.
  */
-export const make = Effect.fn("EditaiiMaquina.make")(function* (
-  configuracao: Effect.Effect<Journal.Configuracao, Journal.EditaiiConfiguracaoIlegivel>,
-) {
+export const make = Effect.fn("EditaiiMaquina.make")(function* () {
   const base = yield* Effect.acquireRelease(
     Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-editaii-connector-"))),
     (dir) => Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true })),
@@ -489,23 +488,19 @@ export const make = Effect.fn("EditaiiMaquina.make")(function* (
       ),
     ),
   );
-  /** Starts the T3 server's part over the machine, with the T3 that `t3` builds. */
-  const ligar = Effect.fn("EditaiiMaquina.ligar")(function* <ROut, E>(
-    t3: Layer.Layer<Adapter.EditaiiT3Adapter | ROut, E>,
+  /** Starts `servidor`, the T3 server's part, over the machine. */
+  const subir = Effect.fn("EditaiiMaquina.subir")(function* <ROut, E>(
+    servidor: Layer.Layer<ROut | Connector.EditaiiConnector | Connection.EditaiiConnection, E>,
   ) {
     const scope = yield* Scope.make();
     yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
-    const servidor = Connector.layer(configuracao).pipe(
-      Layer.provideMerge(Layer.mergeAll(Connection.layer, journal)),
-      Layer.provideMerge(Layer.merge(deps, t3)),
-    );
     const context = yield* Layer.build(servidor).pipe(Effect.provideService(Scope.Scope, scope));
     const connection = Context.get(context, Connection.EditaiiConnection);
     return {
       parar: Scope.close(scope, Exit.void),
       context,
+      connection,
       connector: Context.get(context, Connector.EditaiiConnector),
-      journal: Context.get(context, Journal.EditaiiJournal),
       vinculo: connection.state.pipe(Effect.map(Connection.vinculoDo)),
       /** Waits until no link is connected. */
       desconectado: connection.changes.pipe(
@@ -515,16 +510,48 @@ export const make = Effect.fn("EditaiiMaquina.make")(function* (
       ),
     };
   });
+  /**
+   * Starts the connector over the machine, with the T3 that `t3` builds and new conversations
+   * configured by `configuracao`.
+   */
+  const ligar = <ROut, E>(
+    t3: Layer.Layer<Adapter.EditaiiT3Adapter | ROut, E>,
+    configuracao: Effect.Effect<Journal.Configuracao, Journal.EditaiiConfiguracaoIlegivel>,
+  ) =>
+    subir(
+      Connector.layer(configuracao).pipe(
+        Layer.provideMerge(Layer.mergeAll(Connection.layer, journal)),
+        Layer.provideMerge(Layer.merge(deps, t3)),
+      ),
+    ).pipe(
+      Effect.map((ligado) => ({
+        ...ligado,
+        journal: Context.get(ligado.context, Journal.EditaiiJournal),
+      })),
+    );
+  type ServicosDoT3 = Exclude<Layer.Services<typeof Runtime.layer>, Layer.Success<typeof deps>>;
+  /**
+   * Starts the Editaii over the machine as the T3 server mounts it (EditaiiRuntime.ts), with the
+   * services of the T3 that `t3` builds; the journal is the real one, with no failures injected.
+   */
+  const montar = <ROut, E>(t3: Layer.Layer<ServicosDoT3 | ROut, E>) =>
+    subir(Runtime.layer.pipe(Layer.provideMerge(Layer.merge(deps, t3))));
   return {
     worker,
     mudou,
     ligar,
+    montar,
     falhar,
     desligar,
     quando: mudou.quando,
     eventosGravados: () => eventosGravados,
+    /** Waits until the connector is in a pause, which lasts until the test moves the clock. */
+    pausado: mudou.quando(() => emPausa > 0),
     /** Lets the connector's pause pass, once it has begun one. */
     pausa: mudou.quando(() => emPausa > 0).pipe(Effect.andThen(TestClock.adjust(PAUSA))),
+    /** The connection's record as saved now. */
+    registro: (): unknown =>
+      salvo === undefined ? undefined : JSON.parse(new TextDecoder().decode(salvo)),
     /** The machine saved as connected the next time the T3 starts. */
     salvar: (maquinaId: string) => {
       salvo = conectada(maquinaId);

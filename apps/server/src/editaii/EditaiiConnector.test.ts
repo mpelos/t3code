@@ -191,11 +191,11 @@ const SIM: Protocol.Respostas = { p1: { texto: "Sim" } };
 const maquinaCom = Effect.fn("test.maquinaCom")(function* (
   configuracao: Effect.Effect<Journal.Configuracao, Journal.EditaiiConfiguracaoIlegivel>,
 ) {
-  const m = yield* Maquinas.make(configuracao);
+  const m = yield* Maquinas.make();
   const t3 = fakeT3(m.mudou);
   return {
     ...m,
-    ligar: m.ligar(Layer.succeed(Adapter.EditaiiT3Adapter, t3.adapter)),
+    ligar: m.ligar(Layer.succeed(Adapter.EditaiiT3Adapter, t3.adapter), configuracao),
     t3: t3.t,
     fato: t3.fato,
     esquecer: t3.esquecer,

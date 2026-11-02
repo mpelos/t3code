@@ -33,6 +33,7 @@ import * as Stream from "effect/Stream";
 import * as Adapter from "./EditaiiT3Adapter.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as Receipts from "../orchestration-v2/CommandReceiptStore.ts";
+import * as CommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
 import * as Worker from "../orchestration-v2/EffectWorker.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
@@ -187,7 +188,8 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
     runEffectWorker: false,
     recoverOnStartup: options.recoverOnStartup ?? false,
   });
-  const receipts = Receipts.layer.pipe(Layer.provide(database));
+  const repository = CommandReceipts.layer.pipe(Layer.provide(database));
+  const receipts = Receipts.layerFromApplicationReceipts.pipe(Layer.provide(repository));
   const settings = Settings.layerTest();
   const threads = Threads.layer.pipe(
     Layer.provide(Layer.mergeAll(orchestration, receipts, settings)),
@@ -205,6 +207,9 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
     updatedAt: "2026-06-20T00:00:00.000Z",
     deletedAt: null,
   };
+  const projects = Layer.mock(Project.ProjectService)({
+    getById: () => Effect.succeedSome(project),
+  });
   const external = Layer.mergeAll(
     SetupTracker.layer,
     RegistryMock.layer(),
@@ -212,7 +217,7 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
     IdAllocator.layer,
     Layer.mock(CloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
     Layer.mock(Terminal.TerminalManager)({ close: () => Effect.void }),
-    Layer.mock(Project.ProjectService)({ getById: () => Effect.succeedSome(project) }),
+    projects,
     Layer.mock(Git.GitWorkflowService)({ hasCommit: () => Effect.succeed(false) }),
     Layer.succeed(Setup.ProjectSetupScriptRunner, {
       runForThread: () => Effect.succeed({ status: "no-script" }),
@@ -225,7 +230,17 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
     }),
   );
   const launch = Launch.layer.pipe(Layer.provide(Layer.mergeAll(external, threads, receipts)));
-  const dependencies = Layer.mergeAll(orchestration, receipts, threads, launch, database);
+  // What the T3 server gives the Editaii (EditaiiRuntime.ts), and the database it all runs on.
+  const dependencies = Layer.mergeAll(
+    orchestration,
+    receipts,
+    repository,
+    threads,
+    launch,
+    projects,
+    settings,
+    database,
+  );
   const layer = Layer.provideMerge(Adapter.layer, dependencies);
 
   /**
