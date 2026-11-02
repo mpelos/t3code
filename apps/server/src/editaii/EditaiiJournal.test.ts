@@ -686,33 +686,55 @@ const executarOuInspecionar = (passo: EditaiiJournal.Passo) => {
 };
 
 describe("EditaiiJournal requests", () => {
+  it.effect("requests queue durably: one is waited on, and they close by explicit facts only", () =>
+    Effect.gen(function* () {
+      const a = yield* ambiente;
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          yield* iniciar(j);
+          yield* j.observar(V1, "trabalho-1", question("X"));
+          yield* j.observar(V1, "trabalho-1", question("Y"));
+          // Only Y changes; X is still the one waited on.
+          yield* j.observar(V1, "trabalho-1", question("Y", "message"));
+          assert.deepEqual(tipos(yield* enviar(j)), ["trabalho-1:1:intervencao"]);
+        }),
+      );
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          yield* j.observar(V1, "trabalho-1", resolved("X"));
+          // Another close of X changes nothing.
+          yield* j.observar(V1, "trabalho-1", resolved("X", "cancelled"));
+          const enviados = yield* enviar(j);
+          assert.deepEqual(tipos(enviados), ["trabalho-1:2:retomado", "trabalho-1:3:intervencao"]);
+          assert.deepInclude(enviados[1], { referencia: "Y" });
+        }),
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.effect(
-    "requests queue durably: one is waited on, they close by explicit facts only, and never reopen",
+    "a request the T3 closed showing pending again means the T3 went back: the job stops",
     () =>
       Effect.gen(function* () {
         const a = yield* ambiente;
         yield* usar(a, (j) =>
           Effect.gen(function* () {
-            yield* iniciar(j);
+            const { plano } = yield* iniciar(j);
             yield* j.observar(V1, "trabalho-1", question("X"));
-            yield* j.observar(V1, "trabalho-1", question("Y"));
-            // Only Y changes; X is still the one waited on.
-            yield* j.observar(V1, "trabalho-1", question("Y", "message"));
-            assert.deepEqual(tipos(yield* enviar(j)), ["trabalho-1:1:intervencao"]);
-          }),
-        );
-        yield* usar(a, (j) =>
-          Effect.gen(function* () {
             yield* j.observar(V1, "trabalho-1", resolved("X"));
-            // Late facts about X change nothing.
-            yield* j.observar(V1, "trabalho-1", question("X"));
-            yield* j.observar(V1, "trabalho-1", resolved("X", "cancelled"));
-            const enviados = yield* enviar(j);
-            assert.deepEqual(tipos(enviados), [
+            // As a T3 restored to before the answer shows it after its restart.
+            assert.strictEqual(
+              yield* j.observar(V1, "trabalho-1", question("X", "message")),
+              "fim",
+            );
+            assert.deepEqual(tipos(yield* enviar(j)), [
+              "trabalho-1:1:intervencao",
               "trabalho-1:2:retomado",
-              "trabalho-1:3:intervencao",
+              "trabalho-1:3:thread_perdida",
             ]);
-            assert.deepInclude(enviados[1], { referencia: "Y" });
+            const seguinte = pedido(2, { thread_t3: plano.threadId });
+            assert.deepEqual(yield* j.receber(V1, seguinte, pronta), { type: "aguardar" });
+            assert.deepEqual(tipos(yield* enviar(j)), ["trabalho-2:1:thread_perdida"]);
           }),
         );
       }).pipe(Effect.scoped),

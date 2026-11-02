@@ -149,7 +149,8 @@ export interface EditaiiJournalShape {
   /**
    * Projects one observation of a followed job; `fim` once the job ended here. A job that already
    * ended is only followed to check its conversation: the fact that ended it lets it go on, and
-   * another end or a lost thread stops it.
+   * another end or a lost thread stops it. A request the T3 closed showing pending again means
+   * the T3 went back to before it closed, an answer included: the job stops as a lost thread.
    */
   readonly observar: (
     vinculo: EditaiiVinculo,
@@ -584,9 +585,10 @@ const make = Effect.gen(function* () {
 
   const registrarPendencia = Effect.fn(function* (
     k: string,
-    trabalhoId: string,
+    t: TrabalhoRow,
     o: Extract<Observation, { type: "question" | "approval" }>,
   ) {
+    const trabalhoId = t.trabalho_id;
     const p = yield* pendencia(k, trabalhoId, o.requestId);
     if (p === undefined) {
       const original = yield* originalJson.encode(
@@ -600,10 +602,14 @@ const make = Effect.gen(function* () {
                ${o.type === "question" ? "pergunta" : "aprovacao"}, ${o.capability}, 'pendente', ${original}
         FROM pendencias WHERE vinculo = ${k} AND trabalho_id = ${trabalhoId}`;
       yield* selecionarProxima(k, trabalhoId);
-      return;
+      return "seguir" as const;
     }
-    // Closed never reopens; a late observation of it changes nothing.
-    if (p.estado === "encerrada" || p.capability === o.capability) return;
+    // The T3 never reopens a request it closed; its observations of a job only move forward.
+    if (p.estado === "encerrada") {
+      yield* perderThread(k, t);
+      return "fim" as const;
+    }
+    if (p.capability === o.capability) return "seguir" as const;
     yield* sql`UPDATE pendencias SET capability = ${o.capability}
                WHERE vinculo = ${k} AND trabalho_id = ${trabalhoId} AND request_id = ${o.requestId}`;
     // The question the Editaii offers can no longer be answered there: its wait ends, and it is an action in the T3.
@@ -612,6 +618,7 @@ const make = Effect.gen(function* () {
       yield* emitir(k, trabalhoId, { tipo: "acao_necessaria", descricao: QUESTION_NEEDS_T3 });
       yield* setEstado(k, trabalhoId, "acao_no_t3");
     }
+    return "seguir" as const;
   });
 
   const entrega = Effect.fn(function* (k: string, entregaId: string) {
@@ -956,8 +963,7 @@ const make = Effect.gen(function* () {
             return "seguir" as const;
           case "question":
           case "approval":
-            yield* registrarPendencia(k, trabalhoId, o);
-            return "seguir" as const;
+            return yield* registrarPendencia(k, t, o);
           case "resolved":
             yield* fecharPendencia(k, trabalhoId, o.requestId, o.status);
             return "seguir" as const;

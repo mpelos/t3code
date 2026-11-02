@@ -38,8 +38,8 @@ type Invocacao = "aceitar" | "recusar" | "travar_antes" | "travar_depois";
 /**
  * The T3 as the adapter shows it. An invocation may hang before or after it takes effect, as a
  * crash would leave it. Each accepted run is a log the test appends facts to. Like the real
- * adapter, `observe` shows the whole run again and then follows it to its final fact; a run whose
- * thread is gone shows only that.
+ * adapter, `observe` shows the whole run again, each request as it is now, and then follows it to
+ * its final fact; a run whose thread is gone shows only that.
  */
 const fakeT3 = (mudou: Sinal) => {
   const aceitos = new Map<string, Adapter.Acceptance>();
@@ -129,7 +129,12 @@ const fakeT3 = (mudou: Sinal) => {
           let visto = 0;
           return SubscriptionRef.changes(yield* run(acceptance.runId)).pipe(
             Stream.flatMap((log) => {
-              const novos = log.filter((o) => o.sequence > visto);
+              const agora = log.filter(
+                (o, i) =>
+                  !("requestId" in o) ||
+                  log.findLastIndex((p) => "requestId" in p && p.requestId === o.requestId) === i,
+              );
+              const novos = agora.filter((o) => o.sequence > visto);
               visto = Math.max(visto, ...novos.map((o) => o.sequence));
               return Stream.fromIterable(novos);
             }),

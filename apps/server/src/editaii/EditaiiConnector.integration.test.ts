@@ -179,6 +179,65 @@ describe("EditaiiConnector over the real T3", () => {
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect(
+    "a T3 restored to before an answered question stops the job, though its events went past",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = yield* fs.makeTempDirectoryScoped();
+        const restaurado = `${dir}/restaurado.sqlite`;
+        const h = yield* T3.harness("editaii-connector-respondida", `${dir}/t3.sqlite`, {
+          recoverOnStartup: true,
+        });
+        const m = yield* Maquinas.make(configuracao);
+        const t3 = yield* m.ligar(h.layer);
+        const liberado = yield* noT3(t3)(h.release());
+        m.worker.pedir(1);
+        const turn = yield* noT3(t3)(h.beginTurn(liberado));
+        yield* m.quando(() => m.worker.estado(1) === "em_execucao");
+        yield* noT3(t3)(h.question(turn, "question", "x"));
+        yield* m.quando(() => m.worker.estado(1) === "aguardando_pessoa");
+        // The backup is taken with the question pending; the answer comes after it.
+        yield* noT3(t3)(SqlClient.SqlClient.use((sql) => sql`VACUUM INTO ${restaurado}`));
+        const [intervencao] = m.worker.aplicados;
+        if (intervencao?.tipo !== "intervencao") return assert.fail("expected the intervention");
+        m.worker.responder(
+          1,
+          Object.fromEntries(intervencao.perguntas.map((p) => [p.id, { texto: `sim, ${p.id}` }])),
+        );
+        // The Worker has the end of the wait: the journal saw the T3 close the question.
+        yield* m.quando(() => m.eventosGravados() === 2);
+        const sequencia = yield* noT3(t3)(
+          Orchestrator.OrchestratorV2.use((engine) => engine.getThreadEventSequence(turn.threadId)),
+        );
+        yield* t3.parar;
+
+        // The restored T3 restarts: the run ends and the same question is pending again, to be
+        // answered by message, at a sequence past where the journal stopped.
+        const r = yield* T3.harness("editaii-connector-antes-da-resposta", restaurado, {
+          recoverOnStartup: true,
+        });
+        const depois = yield* m.ligar(r.layer);
+        const { snapshotSequence, projection } = yield* noT3(depois)(
+          Orchestrator.OrchestratorV2.use((engine) => engine.getThreadSnapshot(turn.threadId)),
+        );
+        assert.isAtLeast(snapshotSequence, sequencia);
+        assert.deepEqual(
+          projection.runtimeRequests.map((q) => [q.id, q.status, q.responseCapability.type]),
+          [[intervencao.referencia, "pending", "message"]],
+        );
+
+        yield* m.quando(() => m.worker.estado(1) === "reconciliacao");
+        assert.deepEqual(Maquinas.tipos(m.worker.aplicados), [
+          "trabalho-1:1:intervencao",
+          "trabalho-1:2:retomado",
+          "trabalho-1:3:thread_perdida",
+        ]);
+        assert.strictEqual(yield* Queue.size(r.started), 0);
+        assert.deepEqual(m.worker.invalidos, []);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   describe("after a restart, the next request of a conversation", () => {
     it.effect("runs when the T3 still has the end of its last job", () =>
       Effect.gen(function* () {
