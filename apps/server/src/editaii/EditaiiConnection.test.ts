@@ -29,6 +29,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ExternalLauncher from "../process/externalLauncher.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as EditaiiConnection from "./EditaiiConnection.ts";
+import type * as Protocol from "./EditaiiProtocol.ts";
 import type { EditaiiConnectionState } from "@t3tools/contracts";
 
 const ORIGIN = "https://editaii.example";
@@ -58,6 +59,33 @@ const MACHINE = {
   emitida_em: "2026-11-01T00:00:00.000Z",
   ativada_em: "2026-11-01T00:00:00.000Z",
   revogada_em: null,
+};
+
+const CONNECTED = new TextEncoder().encode(
+  JSON.stringify({
+    version: 1,
+    phase: "connected",
+    origin: ORIGIN,
+    environmentId: ENVIRONMENT,
+    client_id: "machines.access",
+    client_secret: "test-secret",
+    credential: "machine-credential",
+    machine: MACHINE,
+  }),
+);
+const ENTREGA = {
+  versao: 1,
+  entrega_id: "entrega",
+  tipo: "pedido",
+  trabalho_id: "trabalho",
+  conversa: { id: "conversa", geracao: 1, thread_t3: null },
+  edital: { id: "edital", revisao: 1, ficha: {} },
+  contexto: [],
+  pedido: { mensagem_id: "mensagem", seq: 3, autor_nome: "Pessoa", texto: "Resuma o edital" },
+};
+const jsonBody = (request: HttpClientRequest.HttpClientRequest): unknown => {
+  if (request.body._tag !== "Uint8Array") throw new Error("Expected a JSON request");
+  return JSON.parse(new TextDecoder().decode(request.body.body));
 };
 
 const harness = Effect.fn("test.EditaiiConnection.harness")(function* (
@@ -737,6 +765,179 @@ it.layer(NodeServices.layer)("Editaii connection", (it) => {
       const error = yield* h.connection.reopenBrowser().pipe(Effect.flip);
       expect(error.reason).toBe("expired");
       expect(h.requests).toHaveLength(0);
+    }),
+  );
+
+  it.effect(
+    "a connected machine reaches the Worker through its session, with both credentials",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness({
+          initial: CONNECTED,
+          reply: (request) =>
+            Effect.succeed(
+              request.url.endsWith("/proxima")
+                ? Response.json({ entrega: ENTREGA })
+                : request.url.endsWith("/confirmar")
+                  ? Response.json({ ok: true })
+                  : Response.json({ aplicados: 1 }),
+            ),
+        });
+        const recibo: Protocol.Recibo = {
+          thread: "thread",
+          mensagem: "message",
+          run: "run",
+          comandos: ["command"],
+        };
+        const eventos = [
+          { id: "event", trabalho_id: "trabalho", sequencia: 1, tipo: "retomado" as const },
+        ];
+        yield* h.connection.withSession((session) =>
+          Effect.gen(function* () {
+            expect(session.vinculo).toEqual({
+              origem: ORIGIN,
+              maquina: MACHINE.id,
+              ambiente: ENVIRONMENT,
+            });
+            expect(yield* session.proxima).toEqual(ENTREGA);
+            yield* session.confirmar("entrega/1", recibo);
+            yield* session.eventos(eventos);
+          }),
+        );
+        expect(h.requests.map((request) => request.url)).toEqual([
+          `${ORIGIN}/api/maquina/entregas/proxima`,
+          `${ORIGIN}/api/maquina/entregas/entrega%2F1/confirmar`,
+          `${ORIGIN}/api/maquina/eventos`,
+        ]);
+        for (const request of h.requests)
+          expect(request.headers).toMatchObject({
+            "cf-access-client-id": "machines.access",
+            "cf-access-client-secret": "test-secret",
+            "editaii-credencial": "machine-credential",
+          });
+        expect(h.requests.map(jsonBody)).toEqual([
+          { versao_protocolo: 1 },
+          { recibo },
+          { eventos },
+        ]);
+      }),
+  );
+
+  it.effect("a session starts when the machine connects", () =>
+    Effect.gen(function* () {
+      const h = yield* harness();
+      const vinculo = yield* Deferred.make<EditaiiConnection.EditaiiVinculo>();
+      const using = yield* h.connection
+        .withSession((session) => Deferred.succeed(vinculo, session.vinculo))
+        .pipe(Effect.forkChild);
+      yield* callback(yield* h.begin());
+      expect(yield* Deferred.await(vinculo)).toEqual({
+        origem: ORIGIN,
+        maquina: MACHINE.id,
+        ambiente: ENVIRONMENT,
+      });
+      yield* Fiber.join(using);
+    }),
+  );
+
+  it.effect(
+    "disconnecting interrupts the session's work, waits for it and closes the session",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness({ initial: CONNECTED });
+        const started = yield* Deferred.make<EditaiiConnection.EditaiiSession>();
+        const ended = yield* Deferred.make<void>();
+        const using = yield* h.connection
+          .withSession((session) =>
+            Deferred.succeed(started, session).pipe(
+              Effect.andThen(Effect.never),
+              Effect.ensuring(Deferred.succeed(ended, undefined)),
+            ),
+          )
+          .pipe(Effect.forkChild);
+        const session = yield* Deferred.await(started);
+        yield* h.connection.disconnect();
+        expect(yield* Deferred.isDone(ended)).toBe(true);
+        expect(Exit.isSuccess(yield* Fiber.await(using))).toBe(true);
+        expect((yield* session.proxima.pipe(Effect.flip)).reason).toBe("interrupted");
+        expect(h.requests).toHaveLength(0);
+      }),
+  );
+
+  it.effect(
+    "a failed call shows on the panel until one succeeds; a conflict is about the work",
+    () =>
+      Effect.gen(function* () {
+        let up = false;
+        const h = yield* harness({
+          initial: CONNECTED,
+          reply: (request) =>
+            Effect.succeed(
+              request.url.endsWith("/confirmar")
+                ? Response.json({ erro: "conflito" }, { status: 409 })
+                : up
+                  ? Response.json({ entrega: null })
+                  : new Response("unavailable", { status: 503 }),
+            ),
+        });
+        yield* h.connection.withSession((session) =>
+          Effect.gen(function* () {
+            expect((yield* session.proxima.pipe(Effect.flip)).reason).toBe("network");
+            expect((yield* h.connection.state).problem).toBe("network");
+            up = true;
+            expect(yield* session.proxima).toBeNull();
+            expect(yield* h.connection.state).toMatchObject({ status: "connected", problem: null });
+            const conflict = yield* session
+              .confirmar("entrega", { comando: "c" })
+              .pipe(Effect.flip);
+            expect(conflict.reason).toBe("conflict");
+            expect((yield* h.connection.state).problem).toBeNull();
+          }),
+        );
+      }),
+  );
+
+  it.effect("a delivery outside the protocol is refused as a protocol error", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({
+        initial: CONNECTED,
+        reply: () => Effect.succeed(Response.json({ entrega: { ...ENTREGA, versao: 2 } })),
+      });
+      yield* h.connection.withSession((session) =>
+        Effect.gen(function* () {
+          expect((yield* session.proxima.pipe(Effect.flip)).reason).toBe("protocol");
+        }),
+      );
+    }),
+  );
+
+  it.effect("the work's own failure ends the session call with that failure", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({ initial: CONNECTED });
+      const failure = yield* h.connection
+        .withSession(() => Effect.fail("work failed" as const))
+        .pipe(Effect.flip);
+      expect(failure).toBe("work failed");
+    }),
+  );
+
+  it.effect("interrupting the caller stops the session's work too", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({ initial: CONNECTED });
+      const started = yield* Deferred.make<void>();
+      const ended = yield* Deferred.make<void>();
+      const using = yield* h.connection
+        .withSession(() =>
+          Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(Effect.never),
+            Effect.ensuring(Deferred.succeed(ended, undefined)),
+          ),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(started);
+      yield* Fiber.interrupt(using);
+      expect(yield* Deferred.isDone(ended)).toBe(true);
+      expect((yield* h.connection.state).status).toBe("connected");
     }),
   );
 });

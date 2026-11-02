@@ -3,12 +3,14 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeCrypto from "node:crypto";
 import * as NodeHttp from "node:http";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as ByteSize from "effect/ByteSize";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -30,6 +32,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ExternalLauncher from "../process/externalLauncher.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { forkParked } from "../serverActivation.ts";
+import * as Protocol from "./EditaiiProtocol.ts";
 import {
   EditaiiConnectionState,
   EditaiiMachine,
@@ -65,6 +68,8 @@ const Common = {
   origin: Schema.NullOr(Origin),
   environmentId: Schema.String,
 };
+// Only a disconnected record may lack an origin: pairing starts from a configured one.
+const Linked = { ...Common, origin: Origin };
 const PairingFields = {
   attempt: Schema.String,
   state: Schema.String,
@@ -77,16 +82,16 @@ const PairingFields = {
 const AccessToken = { client_id: Schema.String, client_secret: Schema.String };
 const RecordSchema = Schema.Union([
   Schema.Struct({ ...Common, phase: Schema.Literal("disconnected") }),
-  Schema.Struct({ ...Common, ...PairingFields, phase: Schema.Literal("pairing") }),
+  Schema.Struct({ ...Linked, ...PairingFields, phase: Schema.Literal("pairing") }),
   Schema.Struct({
-    ...Common,
+    ...Linked,
     ...PairingFields,
     ...AccessToken,
     code: Schema.String,
     phase: Schema.Literal("redeeming"),
   }),
   Schema.Struct({
-    ...Common,
+    ...Linked,
     ...AccessToken,
     credential: Schema.String,
     machine: EditaiiMachine,
@@ -96,6 +101,7 @@ const RecordSchema = Schema.Union([
 type Stored = typeof RecordSchema.Type;
 type Pairing = Extract<Stored, { phase: "pairing" }>;
 type Redeeming = Extract<Stored, { phase: "redeeming" }>;
+type Connected = Extract<Stored, { phase: "connected" }>;
 const RecordJson = Schema.fromJsonString(RecordSchema);
 const SECRET_NAME = "editaii-connection";
 const PAIRING_LIFETIME = 10 * 60 * 1000;
@@ -104,6 +110,35 @@ const encodeRecord = Schema.encodeEffect(RecordJson);
 const decodeRecord = Schema.decodeEffect(RecordJson);
 const decodeMachine = Schema.decodeUnknownEffect(EditaiiMachine);
 const decodeJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
+const decodeProxima = Schema.decodeUnknownEffect(
+  Schema.Struct({ entrega: Schema.NullOr(Protocol.Entrega) }),
+);
+const decodeConfirmado = Schema.decodeUnknownEffect(Schema.Struct({ ok: Schema.Literal(true) }));
+const decodeAplicados = Schema.decodeUnknownEffect(Schema.Struct({ aplicados: Schema.Number }));
+
+/** Who this machine is to the Editaii. The connector keeps its local work per link. */
+export interface EditaiiVinculo {
+  readonly origem: string;
+  readonly maquina: string;
+  readonly ambiente: string;
+}
+
+/**
+ * What a connected machine says to the Editaii (docs/protocolo-maquinas.md in the editaii
+ * repository). Calls fail with `conflict` when the Worker answers 409, which is about the work,
+ * not the connection; a closed session refuses calls with `interrupted`.
+ */
+export interface EditaiiSession {
+  readonly vinculo: EditaiiVinculo;
+  readonly proxima: Effect.Effect<Protocol.Entrega | null, EditaiiConnectionError>;
+  readonly confirmar: (
+    entregaId: string,
+    recibo: Protocol.Recibo,
+  ) => Effect.Effect<void, EditaiiConnectionError>;
+  readonly eventos: (
+    eventos: ReadonlyArray<Protocol.Evento>,
+  ) => Effect.Effect<void, EditaiiConnectionError>;
+}
 
 export class EditaiiConnection extends Context.Service<
   EditaiiConnection,
@@ -118,6 +153,14 @@ export class EditaiiConnection extends Context.Service<
     }) => Effect.Effect<void, EditaiiConnectionError>;
     readonly reopenBrowser: () => Effect.Effect<void, EditaiiConnectionError>;
     readonly disconnect: () => Effect.Effect<void, EditaiiConnectionError>;
+    /**
+     * Runs `usar` with the session of the next connected period, in a scope the connection owns,
+     * and returns when `usar` ends or the session does: disconnecting interrupts `usar` and waits
+     * for it.
+     */
+    readonly withSession: <E, R>(
+      usar: (session: EditaiiSession) => Effect.Effect<void, E, R>,
+    ) => Effect.Effect<void, E, R>;
   }
 >()("t3/editaii/EditaiiConnection") {}
 
@@ -139,6 +182,12 @@ const make = Effect.gen(function* () {
   let stored: Stored = { version: 1, phase: "disconnected", origin: null, environmentId };
   let readFailure: EditaiiConnectionError | undefined;
   let session: { readonly scope: Scope.Closeable; readonly attempt: string } | undefined;
+  // The connected period. Cleared before its scope closes, so a scope read from here is open.
+  const active = yield* SubscriptionRef.make<{
+    readonly scope: Scope.Closeable;
+    readonly session: EditaiiSession;
+    readonly close: Effect.Effect<void>;
+  } | null>(null);
   const view = yield* SubscriptionRef.make<EditaiiConnectionState>({
     status: "disconnected",
     origin: null,
@@ -177,31 +226,31 @@ const make = Effect.gen(function* () {
   const assertReadable = Effect.fn("EditaiiConnection.assertReadable")(function* () {
     if (readFailure) return yield* readFailure;
   });
-  const request = Effect.fn("EditaiiConnection.request")(
-    function* (record: Redeeming, operation: "redeem" | "activate") {
-      if (record.origin === null)
-        return yield* new EditaiiConnectionError({ reason: "configuration" });
-      const credentialHash = NodeCrypto.createHash("sha256")
-        .update(record.credential)
-        .digest("hex");
-      const req = HttpClientRequest.post(
-        `${record.origin}/api/maquina/${operation === "redeem" ? "parear/resgatar" : "ativar"}`,
-      ).pipe(
+  // One authenticated POST to the Worker's API: the Access token always, the machine credential
+  // once it exists. Returns the decoded JSON body of a 200.
+  const call = Effect.fn("EditaiiConnection.call")(
+    function* (
+      access: {
+        readonly origin: string;
+        readonly client_id: string;
+        readonly client_secret: string;
+      },
+      path: string,
+      body: unknown,
+      credential: string | null,
+    ) {
+      const req = HttpClientRequest.post(`${access.origin}/api/${path}`).pipe(
         HttpClientRequest.setHeaders({
-          "CF-Access-Client-Id": record.client_id,
-          "CF-Access-Client-Secret": record.client_secret,
+          "CF-Access-Client-Id": access.client_id,
+          "CF-Access-Client-Secret": access.client_secret,
         }),
-        HttpClientRequest.bodyJsonUnsafe(
-          operation === "redeem"
-            ? { codigo: record.code, verificador: record.verifier, credencial_hash: credentialHash }
-            : {},
-        ),
+        HttpClientRequest.bodyJsonUnsafe(body),
       );
       const response = yield* HttpClient.withScope(http)
         .execute(
-          operation === "activate"
-            ? HttpClientRequest.setHeader(req, "Editaii-Credencial", record.credential)
-            : req,
+          credential === null
+            ? req
+            : HttpClientRequest.setHeader(req, "Editaii-Credencial", credential),
         )
         .pipe(
           Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
@@ -228,19 +277,9 @@ const make = Effect.gen(function* () {
       const text = yield* response.text.pipe(
         Effect.mapError((cause) => new EditaiiConnectionError({ reason: "network", cause })),
       );
-      const json = yield* decodeJson(text).pipe(
+      return yield* decodeJson(text).pipe(
         Effect.mapError((cause) => new EditaiiConnectionError({ reason: "protocol", cause })),
       );
-      const machine = yield* decodeMachine(json).pipe(
-        Effect.mapError((cause) => new EditaiiConnectionError({ reason: "protocol", cause })),
-      );
-      if (
-        machine.ambiente_t3 !== environmentId ||
-        machine.revogada_em !== null ||
-        (operation === "activate" && machine.ativada_em === null)
-      )
-        return yield* new EditaiiConnectionError({ reason: "protocol" });
-      return machine;
     },
     Effect.scoped,
     Effect.timeout("20 seconds"),
@@ -250,6 +289,96 @@ const make = Effect.gen(function* () {
     }),
     Effect.withTracerEnabled(false),
   );
+  const request = Effect.fn("EditaiiConnection.request")(function* (
+    record: Redeeming,
+    operation: "redeem" | "activate",
+  ) {
+    const json =
+      operation === "redeem"
+        ? yield* call(
+            record,
+            "maquina/parear/resgatar",
+            {
+              codigo: record.code,
+              verificador: record.verifier,
+              credencial_hash: NodeCrypto.createHash("sha256")
+                .update(record.credential)
+                .digest("hex"),
+            },
+            null,
+          )
+        : yield* call(record, "maquina/ativar", {}, record.credential);
+    const machine = yield* decodeMachine(json).pipe(
+      Effect.mapError((cause) => new EditaiiConnectionError({ reason: "protocol", cause })),
+    );
+    if (
+      machine.ambiente_t3 !== environmentId ||
+      machine.revogada_em !== null ||
+      (operation === "activate" && machine.ativada_em === null)
+    )
+      return yield* new EditaiiConnectionError({ reason: "protocol" });
+    return machine;
+  });
+
+  // Run under `writes`, like every change to `active`.
+  const openSession = Effect.fn("EditaiiConnection.openSession")(function* (record: Connected) {
+    const scope = yield* Scope.make();
+    let closed = false;
+    // A failed call shows on the panel unless it is about the work (conflict); a later success
+    // clears it. While connected, only calls report problems.
+    const sessionCall = Effect.fn("EditaiiConnection.sessionCall")(
+      function* <A>(
+        path: string,
+        body: unknown,
+        decode: (json: unknown) => Effect.Effect<A, Schema.SchemaError>,
+      ) {
+        if (closed) return yield* new EditaiiConnectionError({ reason: "interrupted" });
+        const json = yield* call(record, path, body, record.credential);
+        return yield* decode(json).pipe(
+          Effect.mapError((cause) => new EditaiiConnectionError({ reason: "protocol", cause })),
+        );
+      },
+      Effect.tap(() =>
+        SubscriptionRef.get(view).pipe(
+          Effect.flatMap((current) => (current.problem === null ? Effect.void : publish())),
+        ),
+      ),
+      Effect.tapError((error) =>
+        error.reason === "conflict" || error.reason === "interrupted"
+          ? Effect.void
+          : publish(error.reason),
+      ),
+    );
+    const opened: EditaiiSession = {
+      vinculo: { origem: record.origin, maquina: record.machine.id, ambiente: environmentId },
+      proxima: sessionCall(
+        "maquina/entregas/proxima",
+        { versao_protocolo: Protocol.PROTOCOL_VERSION },
+        decodeProxima,
+      ).pipe(Effect.map((reply) => reply.entrega)),
+      confirmar: (entregaId, recibo) =>
+        sessionCall(
+          `maquina/entregas/${encodeURIComponent(entregaId)}/confirmar`,
+          { recibo },
+          decodeConfirmado,
+        ).pipe(Effect.asVoid),
+      eventos: (eventos) =>
+        sessionCall("maquina/eventos", { eventos }, decodeAplicados).pipe(Effect.asVoid),
+    };
+    yield* SubscriptionRef.set(active, {
+      scope,
+      session: opened,
+      close: Effect.suspend(() => {
+        closed = true;
+        return Scope.close(scope, Exit.void);
+      }),
+    });
+  });
+  // Ends the connected period: later calls are refused, and `usar` is interrupted and awaited.
+  const closeSession = Effect.gen(function* () {
+    const previous = yield* writes.withPermits(1)(SubscriptionRef.getAndSet(active, null));
+    if (previous) yield* previous.close;
+  });
 
   const redeem = Effect.fn("EditaiiConnection.redeem")(function* (record: Redeeming) {
     yield* request(record, "redeem");
@@ -257,7 +386,7 @@ const make = Effect.gen(function* () {
     yield* writes.withPermits(1)(
       Effect.gen(function* () {
         if (session?.attempt !== record.attempt) return;
-        yield* save({
+        const connected: Connected = {
           version: 1,
           phase: "connected",
           origin: record.origin,
@@ -266,7 +395,9 @@ const make = Effect.gen(function* () {
           client_secret: record.client_secret,
           credential: record.credential,
           machine,
-        });
+        };
+        yield* save(connected);
+        yield* openSession(connected);
       }),
     );
   });
@@ -291,8 +422,6 @@ const make = Effect.gen(function* () {
     );
   });
   const openBrowser = Effect.fn("EditaiiConnection.openBrowser")(function* (record: Pairing) {
-    if (record.origin === null)
-      return yield* new EditaiiConnectionError({ reason: "configuration" });
     if (platform === "linux" && !processEnv.DISPLAY?.trim() && !processEnv.WAYLAND_DISPLAY?.trim())
       return yield* new EditaiiConnectionError({ reason: "browser" });
     if (platform === "darwin") {
@@ -444,6 +573,7 @@ const make = Effect.gen(function* () {
       return;
     }
     yield* publish();
+    if (stored.phase === "connected") yield* writes.withPermits(1)(openSession(stored));
     if (stored.phase === "redeeming") {
       const scope = yield* Scope.make();
       session = { scope, attempt: stored.attempt };
@@ -459,7 +589,12 @@ const make = Effect.gen(function* () {
     Effect.ensuring(Deferred.succeed(ready, undefined)),
   );
   yield* forkParked(initialize);
-  yield* Effect.addFinalizer(() => (session ? Scope.close(session.scope, Exit.void) : Effect.void));
+  yield* Effect.addFinalizer(() =>
+    Effect.gen(function* () {
+      if (session) yield* Scope.close(session.scope, Exit.void);
+      yield* closeSession;
+    }),
+  );
 
   const configure = Effect.fn("EditaiiConnection.configure")(function* ({
     origin,
@@ -499,6 +634,7 @@ const make = Effect.gen(function* () {
       !/^.{1,80}$/u.test(machineName.trim())
     )
       return yield* new EditaiiConnectionError({ reason: "configuration" });
+    const origin = stored.origin;
     const attempt = NodeCrypto.randomBytes(32).toString("base64url");
     return yield* Effect.acquireUseRelease(
       Scope.make(),
@@ -511,7 +647,7 @@ const make = Effect.gen(function* () {
           const record: Pairing = {
             version: 1,
             phase: "pairing",
-            origin: stored.origin,
+            origin,
             environmentId,
             attempt,
             state: NodeCrypto.randomBytes(32).toString("base64url"),
@@ -595,6 +731,7 @@ const make = Effect.gen(function* () {
           }),
         );
         if (previous) yield* Scope.close(previous.scope, Exit.void);
+        yield* closeSession;
         yield* writes.withPermits(1)(
           save({ version: 1, phase: "disconnected", origin: stored.origin, environmentId }),
         );
@@ -602,7 +739,24 @@ const make = Effect.gen(function* () {
     );
   }, commands.withPermits(1));
 
+  const withSession = Effect.fn("EditaiiConnection.withSession")(function* <E, R>(
+    usar: (session: EditaiiSession) => Effect.Effect<void, E, R>,
+  ) {
+    yield* Deferred.await(ready);
+    const current = yield* SubscriptionRef.changes(active).pipe(
+      Stream.filter((value) => value !== null),
+      Stream.runHead,
+    );
+    if (Option.isNone(current)) return;
+    // A scope that closed after this read interrupts the fork before `usar` starts.
+    const fiber = yield* usar(current.value.session).pipe(Effect.forkIn(current.value.scope));
+    const exit = yield* Fiber.await(fiber).pipe(Effect.onInterrupt(() => Fiber.interrupt(fiber)));
+    if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause))
+      return yield* Effect.failCause(exit.cause);
+  });
+
   return EditaiiConnection.of({
+    withSession,
     state: Deferred.await(ready).pipe(Effect.andThen(SubscriptionRef.get(view))),
     changes: Stream.unwrap(Deferred.await(ready).pipe(Effect.as(SubscriptionRef.changes(view)))),
     configure,
