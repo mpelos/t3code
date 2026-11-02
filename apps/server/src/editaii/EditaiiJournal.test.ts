@@ -15,8 +15,10 @@ import {
   RuntimeRequestId,
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
@@ -1112,6 +1114,51 @@ describe("EditaiiJournal situation", () => {
             ],
           );
         }),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("what commits is signalled, even when the operation is interrupted right after", () =>
+    Effect.gen(function* () {
+      const a = yield* ambiente;
+      yield* usar(a, (j) =>
+        Effect.gen(function* () {
+          const versao = j.mudancas.pipe(
+            Stream.runHead,
+            Effect.map((v) => (v._tag === "Some" ? v.value : -1)),
+          );
+          yield* iniciar(j);
+          const antes = yield* versao;
+          // The fiber is interrupted as SQLite returns from its COMMIT.
+          let alvo: Fiber.Fiber<unknown, unknown> | undefined;
+          const run = NodeSqlite.StatementSync.prototype.run;
+          const spy = vi
+            .spyOn(NodeSqlite.StatementSync.prototype, "run")
+            .mockImplementation(function (
+              this: NodeSqlite.StatementSync,
+              ...args: Parameters<NodeSqlite.StatementSync["run"]>
+            ) {
+              const result = run.apply(this, args);
+              if (alvo !== undefined && /^\s*COMMIT\b/i.test(this.sourceSQL)) {
+                alvo.interruptUnsafe();
+                alvo = undefined;
+              }
+              return result;
+            });
+          yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()));
+          const fibra = yield* Effect.forkChild(
+            Effect.withFiber((f) => {
+              alvo = f;
+              return j.observar(V1, "trabalho-1", answer("Um"));
+            }),
+          );
+          assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(fibra)));
+          assert.strictEqual(yield* versao, antes + 1);
+          assert.deepEqual(
+            (yield* j.situacao(V1)).trabalhos.map((t) => [t.estado, t.eventosPendentes]),
+            [["concluido", 1]],
+          );
+        }).pipe(Effect.scoped),
       );
     }).pipe(Effect.scoped),
   );
