@@ -4,7 +4,7 @@ import {
   narrationWaveformPath,
   type NarrationController,
   type NarrationState,
-} from "@t3tools/client-runtime/voice-input";
+} from "@t3tools/client-runtime/narration";
 
 export function NarrationWaveform<Context>({
   controller,

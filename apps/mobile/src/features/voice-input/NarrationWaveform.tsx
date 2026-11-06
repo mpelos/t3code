@@ -6,7 +6,7 @@ import {
   narrationWaveformPath,
   type NarrationController,
   type NarrationState,
-} from "@t3tools/client-runtime/voice-input";
+} from "@t3tools/client-runtime/narration";
 import { useControlTheme } from "../../components/ui/useControlTheme";
 
 function createNarrationGesture<Context>(controller: NarrationController<Context>) {

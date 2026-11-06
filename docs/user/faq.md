@@ -77,7 +77,7 @@ Open **Settings > Storage** and turn on automatic worktree cleanup. You can also
 
 ## Is there voice input?
 
-Yes, on web, desktop, iPhone, and Android. Configure a dictation provider in your environment’s speech settings, then use the microphone to fill an editable draft. You can also configure narration to listen to agent responses. [Voice input and read aloud](./composer.md#voice-input-and-read-aloud)
+Yes. On iPhone and Android, dictation uses on-device speech by default; you can opt in to a paired environment instead. Web and desktop require you to choose an environment first. The transcript goes into your draft for review. See [Voice input](./voice-input.md).
 
 ## Does it work on Windows, Mac, and Linux?
 

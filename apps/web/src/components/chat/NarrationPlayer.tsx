@@ -2,7 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
 import { useSyncExternalStore } from "react";
 import { PauseIcon, PlayIcon, XIcon } from "lucide-react";
-import { formatNarrationTime } from "@t3tools/client-runtime/voice-input";
+import { formatNarrationTime } from "@t3tools/client-runtime/narration";
 import { narrationAtom } from "~/state/narration";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
@@ -36,7 +36,7 @@ export function NarrationPlayer() {
                 hash="speech-narration"
                 onClick={() => controller.stop()}
               >
-                Speech settings
+                Read aloud settings
               </Link>
             ) : null}
           </div>

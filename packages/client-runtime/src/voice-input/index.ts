@@ -1,6 +1,7 @@
 export {
   VoiceInputController,
   VOICE_RECORDING_LIMIT_SECONDS,
+  MICROPHONE_PERMISSION_ERROR,
   voiceInputBlocksSubmission,
   type VoiceDraftSnapshot,
   type VoiceInputControllerDependencies,
@@ -10,31 +11,25 @@ export {
   type VoiceRecorderStatus,
 } from "./controller.ts";
 export {
-  voiceTranscriptionFailure,
+  cancelEnvironmentSpeechModelDownload,
+  downloadEnvironmentSpeechModel,
+  getEnvironmentSpeechModels,
+  getEnvironmentSpeechStatus,
+  getEnvironmentSpeechStreamUrl,
+  postProcessEnvironmentTranscript,
+  removeEnvironmentSpeechModel,
+  selectEnvironmentSpeechModel,
+  transcribeEnvironmentPcm,
+  updateEnvironmentSpeechAcceleration,
+  updateEnvironmentSpeechModelUnloadTimeout,
+} from "./environment.ts";
+export { openSpeechStream } from "./stream.ts";
+export {
+  VoiceTranscriptionError,
   throwIfVoiceTranscriptionAborted,
   type PreparedVoiceTranscription,
+  type VoiceStreamingSession,
   type VoiceTranscriber,
   type VoiceTranscriptionErrorCode,
   type VoiceTranscriptionOptions,
 } from "./transcription.ts";
-
-export {
-  NarrationController,
-  type NarrationPlaybackOptions,
-  type NarrationState,
-} from "./narration.ts";
-export {
-  inspectNarrationAudio,
-  formatNarrationTime,
-  narrationWaveformPath,
-} from "./narrationWaveform.ts";
-export {
-  speechProviderOptions,
-  fishNarrationModelOptions,
-  speechSettingsDraft,
-  selectSpeechProvider,
-  dictationSettingsFromDraft,
-  narrationSettingsFromDraft,
-  type SpeechSettingsDraft,
-  type SpeechProvider,
-} from "./settings.ts";

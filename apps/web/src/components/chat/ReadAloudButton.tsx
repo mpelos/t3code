@@ -2,7 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { useSyncExternalStore } from "react";
 import { SquareIcon, Volume2Icon } from "lucide-react";
 import { isNarrationConfigured, type EnvironmentId } from "@t3tools/contracts";
-import { speechContextAtom } from "~/state/speech";
+import { narrationContextAtom } from "~/state/narrationEnvironment";
 import { narrationAtom } from "~/state/narration";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
@@ -20,7 +20,7 @@ export function ReadAloudButton({
   readonly streaming: boolean;
 }) {
   const controller = useAtomValue(narrationAtom);
-  const speech = useAtomValue(speechContextAtom);
+  const speech = useAtomValue(narrationContextAtom);
   const speechEnvironmentId = speech.environmentId;
   const configured = isNarrationConfigured(speech.narration);
   const allowed = speech.canOperate;

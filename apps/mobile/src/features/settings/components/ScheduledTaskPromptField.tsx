@@ -4,6 +4,7 @@ import { AppText as Text } from "../../../components/ui/AppText";
 import type { ComposerEditorSelection } from "../../../components/ComposerEditor";
 import {
   ComposerDictationCancelAction,
+  ComposerDictationError,
   ComposerDictationPrimaryAction,
   ComposerDictationStartAction,
   ComposerDictationStatus,
@@ -22,7 +23,7 @@ export function ScheduledTaskPromptField(props: {
 }) {
   const voice = props.voiceInput;
   const presentation = resolveVoiceComposerPresentation(voice.state, voice.elapsedSeconds);
-  const showsDictation = presentation.statusLabel !== null;
+  const showsDictation = presentation.statusKind === "active";
   const showsIdleTrigger = voice.isAvailable && !showsDictation;
 
   return (
@@ -46,7 +47,6 @@ export function ScheduledTaskPromptField(props: {
         {showsIdleTrigger ? (
           <View className="absolute right-0 bottom-0 rounded-full bg-card">
             <ComposerDictationStartAction
-              onOpenSpeechSettings={voice.openSpeechSettings}
               state={voice.state}
               isAvailable={voice.isAvailable}
               disabled={props.disabled}
@@ -56,6 +56,10 @@ export function ScheduledTaskPromptField(props: {
           </View>
         ) : null}
       </View>
+      <ComposerDictationError
+        error={voice.state.phase === "error" ? voice.state.error : null}
+        onDismiss={voice.cancel}
+      />
       {showsDictation ? (
         <ComposerDictationToolbar showsDictation>
           <View className="h-11 flex-row items-center">
@@ -65,10 +69,8 @@ export function ScheduledTaskPromptField(props: {
               elapsedSeconds={voice.elapsedSeconds}
               phase={voice.state.phase}
               presentation={presentation}
-              onDismissError={voice.cancel}
             />
             <ComposerDictationPrimaryAction
-              onOpenSpeechSettings={voice.openSpeechSettings}
               state={voice.state}
               presentation={presentation}
               isAvailable={voice.isAvailable}

@@ -8,9 +8,9 @@ import {
   NarrationController,
   inspectNarrationAudio,
   type NarrationPlaybackOptions,
-} from "@t3tools/client-runtime/voice-input";
+} from "@t3tools/client-runtime/narration";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { speechEnvironment, speechContextAtom } from "../../state/speech";
+import { narrationEnvironment, narrationContextAtom } from "../../state/narrationEnvironment";
 import {
   acquireAudioSession,
   activateAudioSession,
@@ -101,7 +101,7 @@ export const narrationAtom = Atom.make((get) => {
   const registry = get.registry;
   const controller = new NarrationController<EnvironmentId>({
     synthesize: async (text, environmentId, signal) => {
-      const result = await speechEnvironment.narrate.run(registry, {
+      const result = await narrationEnvironment.narrate.run(registry, {
         environmentId,
         input: { text, signal },
       });
@@ -112,9 +112,9 @@ export const narrationAtom = Atom.make((get) => {
       inspectNarrationAudio(await decodeAudioData(Uint8Array.from(bytes).buffer, 8000)),
     play: playNarration,
   });
-  let previous = registry.get(speechContextAtom);
+  let previous = registry.get(narrationContextAtom);
   get.addFinalizer(
-    registry.subscribe(speechContextAtom, (speech) => {
+    registry.subscribe(narrationContextAtom, (speech) => {
       if (
         speech.environmentId !== previous.environmentId ||
         speech.narration?.provider !== previous.narration?.provider ||

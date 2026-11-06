@@ -1,0 +1,284 @@
+import {
+  NARRATION_CHUNK_MAX_BYTES,
+  QWEN_NARRATION_CHUNK_MAX_CHARACTERS,
+  isNarrationConfigured,
+  SpeechError,
+  type NarrationInput,
+  type SpeechConfigureInput,
+  type NarrationSettings,
+} from "@t3tools/contracts";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import { HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http";
+import { importPKCS8, SignJWT } from "jose";
+import * as ServerSettings from "../serverSettings.ts";
+import { SECRET_REDACTED } from "../settingsSecrets.ts";
+
+const GoogleCredential = Schema.fromJsonString(
+  Schema.Struct({
+    type: Schema.Literal("service_account"),
+    project_id: Schema.NonEmptyString,
+    client_email: Schema.NonEmptyString,
+    private_key: Schema.NonEmptyString,
+  }),
+);
+const decodeGoogleCredential = Schema.decodeEffect(GoogleCredential);
+const GoogleTokenError = Schema.Struct({ error: Schema.String });
+const GoogleToken = Schema.Struct({ access_token: Schema.NonEmptyString });
+const GoogleAudio = Schema.Struct({ audioContent: Schema.Uint8ArrayFromBase64 });
+
+export class SpeechRequestError extends Schema.TaggedError<SpeechRequestError>()(
+  "SpeechRequestError",
+  {
+    reason: Schema.Literals(["invalid-credential", "unavailable", "invalid-response"]),
+    provider: SpeechError.fields.provider,
+    role: SpeechError.fields.role,
+    cause: Schema.Defect(),
+  },
+) {
+  toClientError() {
+    return new SpeechError({
+      reason: this.reason,
+      ...(this.provider ? { provider: this.provider } : {}),
+      ...(this.role ? { role: this.role } : {}),
+    });
+  }
+}
+
+type SpeechOperationError =
+  | SpeechError
+  | SpeechRequestError
+  | import("@t3tools/contracts").ServerSettingsError;
+
+export class Narration extends Context.Service<
+  Narration,
+  {
+    readonly configure: (input: SpeechConfigureInput) => Effect.Effect<void, SpeechOperationError>;
+    readonly narrate: (input: NarrationInput) => Effect.Effect<Uint8Array, SpeechOperationError>;
+  }
+>()("t3/narration/Narration") {}
+
+const make = Effect.gen(function* () {
+  const settings = yield* ServerSettings.ServerSettingsService;
+  const http = yield* HttpClient.HttpClient;
+
+  const execute = Effect.fn("Speech.request")(function* (
+    request: HttpClientRequest.HttpClientRequest,
+  ) {
+    const response = yield* http
+      .execute(request)
+      .pipe(Effect.mapError((cause) => new SpeechRequestError({ reason: "unavailable", cause })));
+    if (response.status === 400 && request.url === "https://oauth2.googleapis.com/token") {
+      const failure = yield* decode(response, GoogleTokenError);
+      return yield* new SpeechError({
+        reason:
+          failure.error === "invalid_grant" || failure.error === "invalid_client"
+            ? "invalid-credential"
+            : "rejected",
+      });
+    }
+    if (response.status === 401) {
+      return yield* new SpeechError({ reason: "invalid-credential" });
+    }
+    if (response.status === 403) return yield* new SpeechError({ reason: "permission-denied" });
+    if (response.status === 402) return yield* new SpeechError({ reason: "insufficient-credit" });
+    if (response.status === 429) return yield* new SpeechError({ reason: "quota-exceeded" });
+    if (response.status < 200 || response.status >= 300) {
+      return yield* new SpeechError({
+        reason: response.status >= 500 ? "unavailable" : "rejected",
+      });
+    }
+    return response;
+  });
+  const decode = <S extends Schema.Top & { readonly DecodingServices: never }>(
+    response: HttpClientResponse.HttpClientResponse,
+    schema: S,
+  ) =>
+    response.json.pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(schema)),
+      Effect.mapError((cause) => new SpeechRequestError({ reason: "invalid-response", cause })),
+    );
+  const googleAuthorization = Effect.fn("Speech.googleAuthorization")(function* (
+    credential: string,
+  ) {
+    const account = yield* decodeGoogleCredential(credential).pipe(
+      Effect.mapError((cause) => new SpeechRequestError({ reason: "invalid-credential", cause })),
+    );
+    const now = Math.floor(DateTime.toEpochMillis(yield* DateTime.now) / 1000);
+    const assertion = yield* Effect.tryPromise({
+      try: async () =>
+        new SignJWT({ scope: "https://www.googleapis.com/auth/cloud-platform" })
+          .setProtectedHeader({ alg: "RS256" })
+          .setIssuer(account.client_email)
+          .setAudience("https://oauth2.googleapis.com/token")
+          .setIssuedAt(now)
+          .setExpirationTime(now + 3600)
+          .sign(await importPKCS8(account.private_key, "RS256")),
+      catch: (cause) => new SpeechRequestError({ reason: "invalid-credential", cause }),
+    });
+    const response = yield* execute(
+      HttpClientRequest.post("https://oauth2.googleapis.com/token").pipe(
+        HttpClientRequest.bodyUrlParams({
+          grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+          assertion,
+        }),
+      ),
+    );
+    const token = yield* decode(response, GoogleToken);
+    return { authorization: `Bearer ${token.access_token}`, projectId: account.project_id };
+  });
+
+  const synthesize = Effect.fn("Speech.synthesize")(function* (
+    config: NarrationSettings,
+    { text }: NarrationInput,
+  ) {
+    if (
+      !text.trim() ||
+      new TextEncoder().encode(text).byteLength > NARRATION_CHUNK_MAX_BYTES ||
+      (config.provider === "qwen" && text.length > QWEN_NARRATION_CHUNK_MAX_CHARACTERS)
+    ) {
+      return yield* new SpeechError({ reason: "invalid-text" });
+    }
+    if (config.provider === "google") {
+      const auth = yield* googleAuthorization(config.credential);
+      const response = yield* execute(
+        HttpClientRequest.post("https://texttospeech.googleapis.com/v1/text:synthesize").pipe(
+          HttpClientRequest.setHeader("authorization", auth.authorization),
+          HttpClientRequest.bodyJsonUnsafe({
+            input: { text },
+            voice: { languageCode: config.language, name: config.voice },
+            audioConfig: { audioEncoding: "MP3" },
+          }),
+        ),
+      );
+      const result = yield* decode(response, GoogleAudio);
+      if (result.audioContent.byteLength === 0)
+        return yield* new SpeechError({ reason: "invalid-response" });
+      return result.audioContent;
+    }
+    let request: HttpClientRequest.HttpClientRequest;
+    switch (config.provider) {
+      case "openai":
+        request = HttpClientRequest.post("https://api.openai.com/v1/audio/speech").pipe(
+          HttpClientRequest.setHeader("authorization", `Bearer ${config.credential}`),
+          HttpClientRequest.bodyJsonUnsafe({
+            model: "gpt-4o-mini-tts",
+            voice: config.voice,
+            input: text,
+            response_format: "mp3",
+          }),
+        );
+        break;
+      case "elevenlabs":
+        request = HttpClientRequest.post(
+          "https://api.elevenlabs.io/v1/text-to-dialogue?output_format=mp3_44100_128",
+        ).pipe(
+          HttpClientRequest.setHeader("xi-api-key", config.credential),
+          HttpClientRequest.bodyJsonUnsafe({
+            inputs: [{ text, voice_id: config.voice }],
+            model_id: "eleven_v4",
+          }),
+        );
+        break;
+      case "fish":
+        request = HttpClientRequest.post("https://api.fish.audio/v1/tts").pipe(
+          HttpClientRequest.setHeader("authorization", `Bearer ${config.credential}`),
+          HttpClientRequest.setHeader("model", config.model),
+          HttpClientRequest.bodyJsonUnsafe({
+            text,
+            reference_id: config.voice,
+            format: "mp3",
+          }),
+        );
+        break;
+      case "qwen": {
+        const base = config.baseUrl.endsWith("/") ? config.baseUrl : `${config.baseUrl}/`;
+        request = HttpClientRequest.post(new URL("v1/audio/speech", base).href).pipe(
+          HttpClientRequest.bodyJsonUnsafe({
+            model: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
+            input: text,
+            voice: config.voice,
+            lang_code: config.language,
+            response_format: "mp3",
+            stream: false,
+            max_tokens: 1024,
+          }),
+        );
+        break;
+      }
+    }
+    const response = yield* execute(request);
+    if (!/^audio\/(?:mpeg|mp3)(?:;|$)/i.test(response.headers["content-type"] ?? ""))
+      return yield* new SpeechError({ reason: "invalid-response" });
+    const buffer = yield* response.arrayBuffer.pipe(
+      Effect.mapError((cause) => new SpeechRequestError({ reason: "invalid-response", cause })),
+    );
+    if (buffer.byteLength === 0) return yield* new SpeechError({ reason: "invalid-response" });
+    return new Uint8Array(buffer);
+  });
+  const contextualize = <A, E extends SpeechOperationError, R>(
+    provider: NarrationSettings["provider"],
+    operation: Effect.Effect<A, E, R>,
+  ) =>
+    operation.pipe(
+      Effect.mapError((error) => {
+        if (error._tag === "SpeechError")
+          return new SpeechError({ reason: error.reason, role: "narration", provider });
+        if (error._tag === "SpeechRequestError")
+          return new SpeechRequestError({
+            reason: error.reason,
+            cause: error.cause,
+            role: "narration",
+            provider,
+          });
+        return error;
+      }),
+    );
+  const narrate = Effect.fn("Speech.narrate")(function* (input: NarrationInput) {
+    const config = (yield* settings.getSettings).speech.narration;
+    if (!config || !isNarrationConfigured(config))
+      return yield* new SpeechError({ reason: "not-configured", role: "narration" });
+    return yield* contextualize(config.provider, synthesize(config, input));
+  });
+  const configure = Effect.fn("Speech.configure")(function* (input: SpeechConfigureInput) {
+    const current = (yield* settings.getSettings).speech.narration;
+    const config = input.config;
+    const candidate =
+      config === null || !("credential" in config)
+        ? config
+        : {
+            ...config,
+            credential:
+              config.credential === SECRET_REDACTED
+                ? current && "credential" in current && current.provider === config.provider
+                  ? current.credential
+                  : ""
+                : config.credential,
+          };
+    if (candidate) {
+      if ("credential" in candidate && !candidate.credential)
+        return yield* new SpeechError({
+          reason: "invalid-credential",
+          role: "narration",
+          provider: candidate.provider,
+        });
+      yield* contextualize(
+        candidate.provider,
+        synthesize(candidate, { text: "Read aloud configuration test." }).pipe(
+          Effect.asVoid,
+          Effect.timeout("120 seconds"),
+          Effect.catchTags({
+            TimeoutError: () => Effect.fail(new SpeechError({ reason: "unavailable" })),
+          }),
+        ),
+      );
+    }
+    yield* settings.updateSettings({ speech: { narration: candidate } });
+  });
+  return Narration.of({ narrate, configure });
+});
+
+export const layer = Layer.effect(Narration, make);

@@ -14,6 +14,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   globalIdleCompaction,
   idleCompactionPatch,
+  PROJECT_SCOPED_SERVER_SETTING_KEYS,
   requiredScopesForProjectMutation,
   resolveIdleCompaction,
   resolveProjectProviderInstanceEnabled,
@@ -53,9 +54,16 @@ it.each([undefined, "s2.1-pro-free", "s2.1-pro", "unknown"] as const)(
       expect(() => decodeServerSettings({ speech: { narration } })).toThrow();
       return;
     }
-    const decoded = decodeServerSettings({ speech: { narration } });
+    const decoded = decodeServerSettings({
+      speech: {
+        dictation: { provider: "openai", credential: "retired-dictation-key", language: "pt-BR" },
+        narration,
+      },
+    });
     expect(decoded.speech.narration).toEqual({ ...narration, model: model ?? "s2.1-pro" });
     expect(decodeServerSettings(encodeServerSettings(decoded)).speech).toEqual(decoded.speech);
+    expect(Object.keys(decoded.speech)).toEqual(["narration"]);
+    expect(JSON.stringify(encodeServerSettings(decoded))).not.toContain("retired-dictation-key");
   },
 );
 
@@ -509,6 +517,39 @@ describe("requiredScopesForProjectMutation", () => {
         scripts: [],
       }),
     ).toEqual(["orchestration:operate", "settings:write"]);
+  });
+});
+
+describe("voice settings", () => {
+  it("does not import voice consent from ordinary device preferences", () => {
+    const imported = {
+      voiceTranscriptionEnvironmentId: "env-1",
+      voiceTranscriptionDestination: { kind: "environment", environmentId: "env-1" },
+      speechPostProcessingEnabled: true,
+    };
+    expect(decodeClientSettings({}).speechSilenceFiltering).toBe(true);
+    expect(decodeClientSettingsPatch({ speechSilenceFiltering: false })).toEqual({
+      speechSilenceFiltering: false,
+    });
+    for (const key of Object.keys(imported)) {
+      expect(decodeClientSettings(imported)).not.toHaveProperty(key);
+      expect(decodeClientSettingsPatch(imported)).not.toHaveProperty(key);
+    }
+  });
+
+  it("keeps the correction cue personal and project vocabulary on the environment", () => {
+    expect(decodeClientSettings({}).speechCorrectionWord).toBe("");
+    expect(() => decodeClientSettingsPatch({ speechCorrectionWord: "x".repeat(51) })).toThrow();
+    expect(DEFAULT_SERVER_SETTINGS.speechProjectCustomWords).toEqual([]);
+    expect(PROJECT_SCOPED_SERVER_SETTING_KEYS).toContain("speechProjectCustomWords");
+  });
+
+  it("stores the transcription model and resources on the environment", () => {
+    expect(DEFAULT_SERVER_SETTINGS).toMatchObject({
+      speechModelId: "handy-computer/parakeet-unified-en-0.6b-gguf",
+      speechAcceleration: "auto",
+      speechModelUnloadTimeout: "min_15",
+    });
   });
 });
 

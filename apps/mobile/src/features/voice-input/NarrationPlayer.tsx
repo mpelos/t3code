@@ -13,7 +13,7 @@ import { cn } from "../../lib/cn";
 import { useToolbarLayout } from "../../components/ui/useToolbarLayout";
 import { rootNavigationRef, whenRootNavigationReady } from "../../lib/rootNavigation";
 import { openSettings } from "../settings/settings-navigation";
-import { formatNarrationTime } from "@t3tools/client-runtime/voice-input";
+import { formatNarrationTime } from "@t3tools/client-runtime/narration";
 import { NarrationWaveform } from "./NarrationWaveform";
 
 export function NarrationPlayer() {
@@ -53,12 +53,12 @@ export function NarrationPlayer() {
               </AppText>
               {state.errorAction === "speech-settings" ? (
                 <Button
-                  label="Speech settings"
+                  label="Read aloud settings"
                   tone="text"
                   onPress={() => {
                     controller.stop();
                     whenRootNavigationReady(() =>
-                      openSettings(rootNavigationRef, "SettingsSpeech", { role: "narration" }),
+                      openSettings(rootNavigationRef, "SettingsReadAloud", undefined),
                     );
                   }}
                 />

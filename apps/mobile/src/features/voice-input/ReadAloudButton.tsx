@@ -2,7 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { useSyncExternalStore } from "react";
 import { Pressable, type ColorValue } from "react-native";
 import { isNarrationConfigured, type EnvironmentId } from "@t3tools/contracts";
-import { speechContextAtom } from "../../state/speech";
+import { narrationContextAtom } from "../../state/narrationEnvironment";
 import { narrationAtom } from "./narration";
 import { SymbolView } from "../../components/ui/AppSymbol";
 
@@ -20,7 +20,7 @@ export function ReadAloudButton({
   readonly tintColor: ColorValue;
 }) {
   const controller = useAtomValue(narrationAtom);
-  const speech = useAtomValue(speechContextAtom);
+  const speech = useAtomValue(narrationContextAtom);
   const speechEnvironmentId = speech.environmentId;
   const configured = isNarrationConfigured(speech.narration);
   const allowed = speech.canOperate;

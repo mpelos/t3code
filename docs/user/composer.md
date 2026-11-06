@@ -14,12 +14,19 @@ to keep a large paste editable in the composer instead.
 
 ## Formatting
 
-The composer writes Markdown and shows it styled as you type. Markers such as
-`**` stay in the text and show beside the styled words when your cursor is on
-them. Lines starting with `- `, `1. `, `- [ ] `, `> `, `# ` or `---` become lists,
-task lists, quotes, headings and rules; ` ``` ` followed by Enter opens a code
-block. What you typed is what the agent receives, markers and numbering
-included, and `#1234` without a space still looks up a pull request.
+The composer writes Markdown and shows it styled as you type. When your cursor
+is on styled text, its Markdown shows instead, such as `**bold**`, and the
+markers edit like any other text: delete them to remove the style, or change
+`**` to `*` for italic. The style updates when your cursor leaves. To write
+plain Markdown with no styling, turn off **Settings → Chat → Rich text
+composer**. Lines starting with `- `, `1. `, `- [ ] `, `> `, `# ` or `---`
+become lists, task lists, quotes, headings and rules; ` ``` ` followed by Enter
+opens a code block. What you typed is what the agent receives, markers and
+numbering included, and `#1234` without a space still looks up a pull request.
+
+Some styled text containing or touching literal Markdown characters, such as a
+bold `path\` or `2*3`, keeps its styling without showing markers. Use formatting
+shortcuts or turn off rich text to edit the formatting of those ranges.
 
 Enter sends. In a list or quote, **Shift+Enter** continues it, and Shift+Enter
 on an empty line moves out one level, then leaves it; **Tab** nests a list item
@@ -177,35 +184,65 @@ Stashes containing uploaded files must be restored in their original environment
 Those files are retained for 24 hours. After an upload expires, restore the prompt
 and use **Attach again** or remove the missing file before sending.
 
-## Voice input and read aloud
+## Voice input on web and desktop
 
-In **Settings → General → Speech**, choose the environment that will process speech
-for this device, then configure one provider for dictation and one for narration.
-This selection is remembered and applies to every chat, including chats whose agents
-run on another environment. The chosen environment must be connected; credentials
-stay in its secret store. Dictation
-supports OpenAI Whisper and Google Cloud Speech-to-Text. Narration supports OpenAI,
-ElevenLabs (Eleven v4), Fish Audio (S2.1 Pro Free or S2.1 Pro), Google Cloud Text-to-Speech, and local
-Qwen3-TTS with preset voices. Each function can be disabled separately.
+Use the composer's microphone or `mod+shift+d` to dictate into your draft. Audio
+is transcribed on an environment you choose in **Settings → Voice**; nothing is
+sent until you choose one. See [Voice input](./voice-input.md).
 
-OpenAI, ElevenLabs, and Fish Audio use your API key. ElevenLabs and Fish Audio also
-need a voice ID; for Fish Audio, copy the ID from the voice's page on fish.audio
-(`reference_id`). For Fish Audio, choose **S2.1 Pro Free** to use the free tier, subject
-to the provider's usage limits, or **S2.1 Pro (paid)** to use your API credit. New
-configurations start with Free; existing configurations keep the paid model until
-you change it. The chosen model is used for both validation and narration. Fish Audio
-detects the text language automatically. Google
-uses a service account JSON key from a project with billing and the corresponding
-API enabled. Choose a language code such as `pt-BR` for dictation, and a voice name
-and matching language for Google narration. Credentials are stored in the connected
-environment's secret store and are not sent back to clients. **Validate and save**
-tests the selected function before replacing its saved configuration; the short test
-request can consume provider credits. If a credential expires later, **Fix credentials**
-opens Speech settings for the selected Speech environment and affected function.
+## Voice input on mobile
 
-For **Qwen3-TTS (local)** narration, install MLX Audio and its
-`mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit` model on the selected Speech
-environment. On an Apple Silicon Mac with Python 3.12 and FFmpeg installed:
+Use the composer's microphone to record, then confirm to transcribe. Text is
+inserted where your selection was when recording started, ready for you to review
+and edit before sending.
+
+By default, audio stays on the phone. Local transcription needs a supported iPhone
+with iOS 26 or later, or Android 12 or later with compatible Google speech services.
+To use a paired environment instead, open **Settings → Voice → Transcribe on**,
+choose the environment, and confirm. Finished recordings go only to that environment,
+even when a draft belongs to another one. This also works on phones without local
+speech recognition. If the chosen environment disconnects, dictation stops; it never
+switches hosts. Choose **This device** to revoke access and discard pending audio.
+On Android, keep T3 Code open while recording and transcribing.
+
+On-device dictation may need a network connection to download a speech model the
+first time. After that it works offline for that language. Android transcribes on
+the device while you record and finishes after you stop. Recordings can be up to five
+minutes long. Canceling or an audio interruption discards the recording and
+preserves your existing draft. Navigating to another screen keeps dictation active;
+use the floating controls to finish or cancel. While recording, the screen stays
+awake; it can sleep normally once recording stops.
+
+Choose a preferred order in **Settings → Voice**. Voice input requests the first
+connected microphone in the list. The list mixes kinds (built-in, other wired, other
+Bluetooth, and CarPlay on iOS) with wired and Bluetooth devices you have dictated
+with, listed by name. Drag to rank them together:
+for example, put **Other Bluetooth** above your AirPods so a new headset is preferred
+while the AirPods microphone stays low. By default, CarPlay comes after the built-in
+microphone on iOS. Swipe a device left to forget it. Android may use another input
+when the preferred microphone cannot be routed. Devices with the same name may share
+a saved preference, but simultaneous same-name inputs remain separately selectable.
+
+T3 Code deletes the temporary recording from your phone after transcription or
+cancellation. The transcript stays in your draft until you send the message to the agent.
+
+## Read aloud
+
+In **Settings → General → Read aloud**, choose the environment that generates
+narration for every chat on this device. This choice is independent of the
+transcription environment in **Settings → Voice**. The chosen environment must be
+connected; credentials stay in its secret store.
+
+Choose one narration provider: OpenAI, ElevenLabs (Eleven v4), Fish Audio,
+Google Cloud Text-to-Speech, or local Qwen3-TTS. OpenAI, ElevenLabs, and Fish Audio
+use API keys; ElevenLabs and Fish Audio also need a voice ID. For Fish Audio,
+choose **S2.1 Pro Free** or **S2.1 Pro (paid)**; the paid model requires API credit.
+Google uses a service account JSON key with Text-to-Speech and billing enabled.
+**Validate and save** generates a short sample before replacing your configuration
+and may consume provider credits.
+
+For local Qwen3-TTS, install MLX Audio and the preset-voice model on the selected
+narration environment. On an Apple Silicon Mac with Python 3.12 and FFmpeg:
 
 ```sh
 python3.12 -m venv ~/.local/share/t3-qwen/venv
@@ -215,36 +252,18 @@ hf download mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit
 HF_HUB_OFFLINE=1 mlx_audio.server --host 127.0.0.1 --port 18320
 ```
 
-Keep the voice server running. In Speech settings, select **Qwen3-TTS (local)**,
-use `http://127.0.0.1:18320` as the server URL, choose a preset voice and language,
-then validate and save. The first generation loads the model into memory, so it
-takes longer. No API key is needed. The URL is resolved
-on the Speech environment; mobile and remote clients receive the generated audio
-through their existing T3 connection. They do not need Python or the model installed.
-Once the model is downloaded, narration can run without an external TTS provider.
-If local generation fails, open **Speech settings** from the player to check its setup.
+Keep the voice server running. Choose **Qwen3-TTS (local)**, set its URL to
+`http://127.0.0.1:18320`, select a preset voice and language, then validate and save.
+Mobile and remote clients receive the generated audio through their T3 connection;
+they do not need the model installed. The first generation takes longer while the
+model loads.
 
-Use the composer's microphone to record, then confirm to transcribe into your draft.
-Review and edit the text before sending. Canceling discards the recording and keeps
-your draft. OpenAI recordings can be up to five minutes; Google recordings can be up
-to 60 seconds. Browsers require microphone permission and a secure connection
-(HTTPS or localhost).
-
-On mobile, **Settings → Microphone** lets you rank connected microphones. The list
-mixes microphone kinds with wired and Bluetooth devices you have dictated with.
-Swipe a device left to forget it.
-
-Use **Read aloud** beside a completed response's actions to hear an AI-generated
-voice. Press it again to stop. Long responses play in consecutive segments; code
-blocks are omitted from narration. Each audio action appears only when its
-respective provider is configured. The player's waveform grows as more audio is
-prepared. Click or drag it to seek within the prepared audio; playback pauses while
-dragging and resumes on release if it was playing. Playback speeds are 1x, 1.25x,
-1.5x, 1.75x, and 2x.
-
-Recordings and narration text are sent to the selected external provider and use
-its billing and data policies. T3 Code deletes temporary recordings after
-transcription or cancellation and does not add generated narration to thread history.
+Use **Read aloud** beside a completed response to hear it. The action appears only
+when narration is configured. Code blocks are omitted. Long responses start playing
+before all segments are generated, and the waveform grows as more audio is ready.
+Click or drag to seek within prepared audio; playback pauses while dragging and
+resumes on release if it was playing. Speeds are 1x, 1.25x, 1.5x, 1.75x, and 2x.
+Pause, resume, or close the player at any time. Narration is not added to thread history.
 
 ## Queued messages
 
@@ -291,6 +310,12 @@ Provider commands must start the message to run. T3 Code commands such as
 
 Send `/compact` in an existing conversation to reduce context usage when the
 provider supports it, even with the context meter turned off.
+
+Send `/clear` on its own, or pick it from the slash menu, to start a fresh session
+in the same thread. Your next message goes to a new provider session that doesn't see the
+earlier messages, and the thread marks where it began with **New session**.
+Earlier messages and diffs stay in the thread. Dismiss the notice above the
+composer to keep the current session instead.
 
 On web and desktop, turn on **Settings → Labs → Legacy → Context
 window indicator (legacy)** to see context usage. The meter is off by default
@@ -339,14 +364,15 @@ the repository by text. Choose a result to insert it as a chip.
 Another thread can be context too. Type `@` followed by part of its title to pick one from
 the same server, or from a machine it links to while the Linked environments beta is on; those
 show the machine's name. On web and desktop you can also drag a thread out of the sidebar and
-drop it on the composer; a multi-selection drops together. On any client, **Copy thread** puts a
-thread on the clipboard that pastes into a composer as its chip. The chip shows the thread's
+drop it on the composer; a multi-selection drops together. On any client, **Copy thread** copies a
+link to the thread that pastes into a composer as its chip. The chip shows the thread's
 current title and opens it when selected. Your prompt only carries a reference: the agent reads the thread's
 history on demand, so attaching a long thread costs nothing until the agent looks. Attaching a
 thread does not change it, and the agent cannot send messages to it unless you ask.
 
 A thread from a linked machine, picked, pasted or dropped, stays a reference that the agent reads
-on that machine. Dropping a thread from any other environment attaches a saved transcript file. The source
+on that machine. A pasted link to a thread on any other machine stays a link. Dropping a thread
+from any other environment attaches a saved transcript file. The source
 environment must be connected and up to date. The transcript includes the visible history and
 saved text context at the time of the drop; later messages and the contents of attached files
 are not copied. The agent can read the saved transcript after the source disconnects. Normal

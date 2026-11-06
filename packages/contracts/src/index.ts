@@ -33,6 +33,7 @@ export * from "./git.ts";
 export * from "./vcs.ts";
 export * from "./sourceControl.ts";
 export * from "./projectClone.ts";
+export * from "./speech.ts";
 export * from "./pullRequest.ts";
 export * from "./pullRequestReviewGuide.ts";
 export * from "./orchestrationDispatch.ts";
@@ -75,3 +76,5 @@ export * from "./clientRpcPermissions.ts";
 
 export * from "./speech.ts";
 export * from "./editaii.ts";
+
+export * from "./narration.ts";
