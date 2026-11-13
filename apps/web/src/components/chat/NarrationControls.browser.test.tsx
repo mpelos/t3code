@@ -270,9 +270,15 @@ it("decodes a real MP3 into a seekable waveform and supports keyboard seeking", 
   expect(duration).toBeGreaterThan(0.5);
   expect(duration).toBeLessThan(1);
   await vi.waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+  const resumed = Promise.withResolvers<void>();
+  play.mockImplementationOnce(() => {
+    resumed.resolve();
+    return Promise.resolve();
+  });
   position.element().focus();
   await userEvent.keyboard("{ArrowRight}");
-  await vi.waitFor(() => expect(play).toHaveBeenCalledTimes(2));
+  await resumed.promise;
+  expect(play).toHaveBeenCalledTimes(2);
   expect(Number(position.element().getAttribute("value"))).toBeGreaterThan(0);
   expect(state.synthesize).toHaveBeenCalledTimes(1);
   await userEvent.click(screen.getByRole("button", { name: "Close narration" }));

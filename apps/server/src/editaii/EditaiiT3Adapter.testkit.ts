@@ -219,7 +219,10 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
     Layer.mock(CloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
     Layer.mock(Terminal.TerminalManager)({ close: () => Effect.void }),
     projects,
-    Layer.mock(Git.GitWorkflowService)({ hasCommit: () => Effect.succeed(false) }),
+    Layer.mock(Git.GitWorkflowService)({
+      hasCommit: () => Effect.succeed(false),
+      currentBranch: () => Effect.succeed(null),
+    }),
     Layer.succeed(Setup.ProjectSetupScriptRunner, {
       runForThread: () => Effect.succeed({ status: "no-script" }),
     }),
@@ -230,7 +233,9 @@ export const harness = Effect.fn("EditaiiT3Adapter.testHarness")(function* (
       folderForThread: () => Effect.succeedNone,
     }),
   );
-  const launch = Launch.layer.pipe(Layer.provide(Layer.mergeAll(external, threads, receipts)));
+  const launch = Launch.layer.pipe(
+    Layer.provide(Layer.mergeAll(external, orchestration, threads, receipts)),
+  );
   // What the T3 server gives the Editaii (EditaiiRuntime.ts), and the database it all runs on. The
   // projects are a mock that never changes, so the application events need not be the T3's own.
   const dependencies = Layer.mergeAll(
