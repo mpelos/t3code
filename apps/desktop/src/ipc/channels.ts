@@ -127,6 +127,7 @@ export const PREVIEW_FIND_RESULT_CHANNEL = "desktop:preview-find-result";
 export const MAC_PERMISSION_HELPER_CHANNEL = "desktop:mac-permission-helper";
 
 export const CHECK_SYSTEM_PERMISSION_CHANNEL = "desktop:check-system-permission";
+export const REQUEST_MICROPHONE_ACCESS_CHANNEL = "desktop:request-microphone-access";
 
 export const PREVIEW_RECORDING_INPUT_CHANNEL = "desktop:preview-recording-input";
 

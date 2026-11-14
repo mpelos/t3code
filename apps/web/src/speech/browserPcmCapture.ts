@@ -5,24 +5,11 @@ import type {
   VoiceTranscriptionOptions,
 } from "@t3tools/client-runtime/voice-input";
 import workletUrl from "./pcmWorklet.ts?worker&url";
+import { openMicrophone } from "./browserMicrophone";
 
 type PreparedBrowserTranscription = PreparedVoiceTranscription & {
   readonly streaming?: VoiceStreamingSession & { readonly feed: (pcm: Float32Array) => void };
 };
-
-/** Opens a microphone. A saved device the browser can no longer find falls back to System default. */
-export async function openMicrophone(microphoneId: string): Promise<MediaStream> {
-  if (!microphoneId) return navigator.mediaDevices.getUserMedia({ audio: true });
-  try {
-    return await navigator.mediaDevices.getUserMedia({
-      audio: { deviceId: { exact: microphoneId } },
-    });
-  } catch (error) {
-    const name = typeof error === "object" && error !== null && "name" in error ? error.name : "";
-    if (name !== "OverconstrainedError" && name !== "NotFoundError") throw error;
-    return navigator.mediaDevices.getUserMedia({ audio: true });
-  }
-}
 
 export function createBrowserPcmCapture(
   input: {
@@ -75,22 +62,7 @@ export function createBrowserPcmCapture(
       chunks = [];
       const microphoneId = await input.getMicrophoneId();
       captureSignal.throwIfAborted();
-      const captured = await new Promise<MediaStream>((resolve, reject) => {
-        const onAbort = () => reject(captureSignal.reason);
-        const permission = openMicrophone(microphoneId);
-        captureSignal.addEventListener("abort", onAbort, { once: true });
-        void permission.then(
-          (media) => {
-            captureSignal.removeEventListener("abort", onAbort);
-            if (captureSignal.aborted) media.getTracks().forEach((track) => track.stop());
-            else resolve(media);
-          },
-          (error: unknown) => {
-            captureSignal.removeEventListener("abort", onAbort);
-            reject(error);
-          },
-        );
-      });
+      const captured = await openMicrophone(microphoneId, captureSignal);
       if (captureSignal.aborted) {
         captured.getTracks().forEach((track) => track.stop());
         captureSignal.throwIfAborted();

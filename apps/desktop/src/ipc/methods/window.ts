@@ -561,3 +561,13 @@ export const checkSystemPermission = DesktopIpc.makeIpcMethod({
     return yield* Effect.promise(check);
   }),
 });
+
+export const requestMicrophoneAccess = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.REQUEST_MICROPHONE_ACCESS_CHANNEL,
+  payload: Schema.Undefined,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.window.requestMicrophoneAccess")(function* () {
+    const permissions = yield* MacPermissions.MacPermissions;
+    return yield* permissions.requestMicrophoneAccess();
+  }),
+});

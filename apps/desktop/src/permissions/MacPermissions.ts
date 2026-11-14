@@ -11,6 +11,7 @@ import type { MacPermission } from "./MacPermission.ts";
 export class MacPermissions extends Context.Service<
   MacPermissions,
   {
+    readonly requestMicrophoneAccess: () => Effect.Effect<boolean, MicrophoneAccessError>;
     readonly showHelper: (
       permission: MacPermission,
       owner: Electron.BrowserWindow | null,
@@ -18,6 +19,15 @@ export class MacPermissions extends Context.Service<
     ) => Effect.Effect<void>;
   }
 >()("@t3tools/desktop/permissions/MacPermissions") {}
+
+class MicrophoneAccessError extends Schema.TaggedError<MicrophoneAccessError>()(
+  "MicrophoneAccessError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Could not request microphone access from macOS.";
+  }
+}
 
 class MacPermissionHelperError extends Schema.TaggedError<MacPermissionHelperError>()(
   "MacPermissionHelperError",
@@ -36,6 +46,16 @@ export const layer = Layer.effect(
     const helper = new MacPermissionHelper();
     yield* Effect.addFinalizer(() => Effect.sync(() => helper.close()));
     return MacPermissions.of({
+      requestMicrophoneAccess: Effect.fn("MacPermissions.requestMicrophoneAccess")(function* () {
+        if (environment.platform !== "darwin") return true;
+        const status = Electron.systemPreferences.getMediaAccessStatus("microphone");
+        if (status === "granted") return true;
+        if (status !== "not-determined") return false;
+        return yield* Effect.tryPromise({
+          try: () => Electron.systemPreferences.askForMediaAccess("microphone"),
+          catch: (cause) => new MicrophoneAccessError({ cause }),
+        });
+      }),
       showHelper: Effect.fn("MacPermissions.showHelper")(function* (permission, owner, isGranted) {
         if (environment.platform !== "darwin" || !environment.isPackaged) return;
         yield* Effect.tryPromise({
